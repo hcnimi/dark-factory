@@ -2,6 +2,18 @@
 
 Deterministic Python pipeline for autonomous spec-to-PR orchestration. Takes a Jira ticket, spec file, or inline description and produces a ready-to-review pull request — calling LLMs only when intelligence is required, keeping everything else in code-controlled deterministic phases.
 
+## Prerequisites
+
+- **Python 3.10+**
+- **git** — for branch/worktree management
+- **gh** — [GitHub CLI](https://cli.github.com/) for PR creation (must be authenticated via `gh auth login`)
+- **Claude Code** — the pipeline runs as a Claude Code slash command
+
+Optional, depending on your input source and target project:
+
+- `jira` CLI — if ingesting from Jira tickets
+- `npm`, `pytest`, `make`, `cargo`, or `go` — detected per project for test/build steps
+
 ## Install
 
 ```bash
@@ -22,6 +34,22 @@ For development:
 ```bash
 pip install -e .
 ```
+
+## Quickstart
+
+```bash
+# 1. Install dark-factory
+pip install dark-factory
+
+# 2. Initialize in your target repo
+cd /path/to/your/repo
+dark-factory init
+
+# 3. Open Claude Code and run the slash command
+/dark-factory "add dark mode toggle to settings page"
+```
+
+That's it — dark-factory will walk you through exploration, planning, a human checkpoint, implementation, and PR creation.
 
 ## Usage
 
