@@ -19,12 +19,16 @@ python3 -m dark_factory run <jira-key|file|description> [--dry-run] [--resume]
 pip install -e .
 ```
 
+**Initialize in a target repo:**
+```bash
+cd /path/to/your/repo
+dark-factory init
+```
+
 ## Structure
 
-- `dark_factory/` — Python package (16 modules)
+- `dark_factory/` — Python package (17 modules)
 - `tests/` — Test suite (32 test files)
-- `commands/` — Claude Code slash command (`/dark-factory`)
-- `.claude-plugin/` — Claude Code plugin metadata
 
 ## Dependencies
 
