@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dark-factory"
+version = "0.1.0"
+description = "Deterministic Python pipeline for autonomous spec-to-PR orchestration"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.11"
+authors = [{ name = "ai-commons" }]
+
+[project.scripts]
+dark-factory = "dark_factory.__main__:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
