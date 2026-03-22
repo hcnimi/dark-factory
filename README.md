@@ -1,6 +1,8 @@
 # Dark Factory
 
-Deterministic Python pipeline for autonomous spec-to-PR orchestration. Takes a Jira ticket, spec file, or inline description and produces a ready-to-review pull request — calling LLMs only when intelligence is required, keeping everything else in code-controlled deterministic phases.
+> **A note on the name:** "Dark factory" evokes fully lights-out autonomous manufacturing — and while the pipeline does automate the path from ticket to pull request, it is not a push-button replacement for human engineering judgment. A human checkpoint gate (Phase 5) is mandatory, every PR still requires human review, and the pipeline does not extend into CI/CD, deployment, or post-merge automation. Treat this as a **developer-acceleration tool** that drafts PRs, not an autonomous production system. The long-term aspiration is fully lights-out operation — but we're not there yet.
+
+Deterministic Python pipeline for spec-to-PR orchestration. Takes a Jira ticket, spec file, or inline description and produces a ready-to-review pull request — calling LLMs only when intelligence is required, keeping everything else in code-controlled deterministic phases.
 
 ## Prerequisites
 
