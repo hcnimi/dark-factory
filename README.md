@@ -5,10 +5,22 @@ Deterministic Python pipeline for autonomous spec-to-PR orchestration. Takes a J
 ## Install
 
 ```bash
-# Python package (editable)
-pip install -e .
+pip install dark-factory
+```
 
-# Claude Code plugin: clone this repo, then install as a plugin
+Then initialize in any git repo:
+
+```bash
+cd /path/to/your/repo
+dark-factory init
+```
+
+This writes `.claude/commands/dark-factory.md` into the target repo, making the `/dark-factory` slash command available in Claude Code. It also ensures `.dark-factory/` (runtime state) is in `.gitignore`.
+
+For development:
+
+```bash
+pip install -e .
 ```
 
 ## Usage
@@ -63,8 +75,9 @@ Sub-phase routing is automatic: 1→1.5→2, 6→6.5→7.
 
 ```
 dark_factory/
-├── __main__.py          # Entry point, phase dispatch, full pipeline run
+├── __main__.py          # Entry point: init, run, phase dispatch
 ├── __init__.py          # Package metadata (v0.1.0)
+├── init.py              # `dark-factory init` — scaffold Claude Code integration
 ├── cli.py               # Argument parsing, source classification (Phase 0)
 ├── state.py             # PipelineState persistence, SourceInfo
 ├── orchestrator.py      # CompletionSummary, diff-size guard, event logging

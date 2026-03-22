@@ -177,13 +177,19 @@ _PHASE_DISPATCH = {
 def main() -> None:
     if len(sys.argv) < 2:
         print(
-            json.dumps({"error": "Usage: python3 -m dark_factory <phase|run> [args...]"}),
+            json.dumps({"error": "Usage: python3 -m dark_factory <init|run|phase> [args...]"}),
             file=sys.stderr,
         )
         sys.exit(1)
 
     phase = sys.argv[1]
     rest = sys.argv[2:]
+
+    # "init" sub-command: scaffold Claude Code integration
+    if phase == "init":
+        from .init import run_init
+        run_init(rest[0] if rest else ".")
+        return
 
     # "run" sub-command: full pipeline execution
     if phase == "run":
@@ -193,7 +199,7 @@ def main() -> None:
     handler = _PHASE_DISPATCH.get(phase)
     if handler is None:
         print(
-            json.dumps({"error": f"Unknown phase: {phase}. Available: {sorted(_PHASE_DISPATCH.keys())} + ['run']"}),
+            json.dumps({"error": f"Unknown phase: {phase}. Available: {sorted(_PHASE_DISPATCH.keys())} + ['init', 'run']"}),
             file=sys.stderr,
         )
         sys.exit(1)
