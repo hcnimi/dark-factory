@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -195,7 +196,7 @@ def run_holdout_tests(
 
         try:
             proc = subprocess.run(
-                ["python3", "-m", "pytest", test_path, "-v"],
+                [sys.executable, "-m", "pytest", test_path, "-v"],
                 capture_output=True,
                 text=True,
                 cwd=worktree_path,

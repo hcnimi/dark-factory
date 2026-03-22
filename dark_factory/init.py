@@ -19,7 +19,7 @@ Delegates all orchestration to the `dark_factory` Python package.
 ## Quick Start
 
 ```bash
-python3 -m dark_factory run $ARGUMENTS
+dark-factory run $ARGUMENTS
 ```
 
 Read the JSON output. If `status` is `"error"`, stop and report.
@@ -47,10 +47,10 @@ For targeted re-runs or debugging:
 
 ```bash
 # Deterministic phases (zero LLM tokens)
-python3 -m dark_factory 0 $ARGUMENTS
-echo '<json>' | python3 -m dark_factory 5
-echo '<json>' | python3 -m dark_factory 6
-echo '<json>' | python3 -m dark_factory 10
+dark-factory 0 $ARGUMENTS
+echo '<json>' | dark-factory 5
+echo '<json>' | dark-factory 6
+echo '<json>' | dark-factory 10
 ```
 
 ## Rules
