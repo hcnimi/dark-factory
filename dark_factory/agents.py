@@ -82,6 +82,29 @@ def _build_permission_callback(policy: SecurityPolicy):
 # SDK query() wrapper — used for bounded tasks (review, PR body)
 # ---------------------------------------------------------------------------
 
+def _patch_sdk_parser() -> None:
+    """Patch claude_code_sdk to skip unknown message types (e.g., rate_limit_event)."""
+    try:
+        from claude_code_sdk._internal import message_parser, client
+    except ImportError:
+        return
+    if getattr(message_parser, "_df_patched", False):
+        return
+    _orig = message_parser.parse_message
+
+    def _tolerant_parse(data):
+        try:
+            return _orig(data)
+        except Exception:
+            return None  # skip unparseable messages
+
+    _tolerant_parse._patched = True  # type: ignore[attr-defined]
+    message_parser.parse_message = _tolerant_parse
+    # client.py holds its own reference from `from .message_parser import parse_message`
+    client.parse_message = _tolerant_parse
+    message_parser._df_patched = True  # type: ignore[attr-defined]
+
+
 async def _sdk_query(
     prompt: str,
     *,
@@ -97,6 +120,8 @@ async def _sdk_query(
         from claude_code_sdk import ClaudeCodeOptions, ResultMessage, query
     except ImportError:
         return [f"[sdk-unavailable] prompt: {prompt[:200]}"], 0.0, 0
+
+    _patch_sdk_parser()
 
     options = ClaudeCodeOptions(
         model=model,
@@ -115,15 +140,44 @@ async def _sdk_query(
     cost = 0.0
     num_turns = 0
 
+    # DEBUG: log all message types
+    _debug_msgs: list[str] = []
     async for msg in query(prompt=prompt, options=options):
+        _content = getattr(msg, 'content', None)
+        _block_info = ""
+        if isinstance(_content, list) and _content:
+            _block_info = f" blocks=[{', '.join(type(b).__name__ + ':' + str(list(vars(b).keys()) if hasattr(b, '__dict__') else dir(b))[:80] for b in _content[:3])}]"
+        _debug_msgs.append(f"{type(msg).__name__}: content_type={type(_content).__name__}{_block_info}")
+        if msg is None:
+            continue
         if isinstance(msg, ResultMessage):
             cost = msg.total_cost_usd or 0.0
             num_turns = getattr(msg, "num_turns", 0) or 0
         elif hasattr(msg, "content"):
-            content = msg.content if isinstance(msg.content, str) else str(msg.content)
-            messages.append(content)
+            extracted = _extract_text(msg.content)
+            _debug_msgs.append(f"  extracted {len(extracted)} texts, first 200: {extracted[0][:200] if extracted else '(empty)'}")
+            for text in extracted:
+                messages.append(text)
+    # Write debug log
+    from pathlib import Path as _P
+    _dbg = _P(".dark-factory") / "sdk_query_debug.txt"
+    _dbg.parent.mkdir(parents=True, exist_ok=True)
+    _dbg.write_text("\n".join(_debug_msgs) + f"\n\nTotal messages collected: {len(messages)}\nCost: {cost}\n")
 
     return messages, cost, num_turns
+
+
+def _extract_text(content: Any) -> list[str]:
+    """Extract text strings from SDK message content (str, list of blocks, etc.)."""
+    if isinstance(content, str):
+        return [content]
+    if isinstance(content, list):
+        texts = []
+        for block in content:
+            if hasattr(block, "text"):
+                texts.append(block.text)
+        return texts
+    return [str(content)]
 
 
 # ---------------------------------------------------------------------------
@@ -168,22 +222,33 @@ async def _sdk_client_query(
     if policy:
         options.can_use_tool = _build_permission_callback(policy)
 
+    _patch_sdk_parser()
     client = ClaudeSDKClient(options)
     messages: list[str] = []
     cost = 0.0
     num_turns = 0
 
+    # can_use_tool requires streaming mode (AsyncIterable prompt, not string)
+    actual_prompt: Any = prompt
+    if policy and isinstance(prompt, str):
+
+        async def _as_stream():
+            yield {
+                "type": "user",
+                "message": {"role": "user", "content": prompt},
+            }
+
+        actual_prompt = _as_stream()
+
     try:
-        await client.connect(prompt=prompt)
+        await client.connect(prompt=actual_prompt)
         async for msg in client.receive_response():
             if isinstance(msg, ResultMessage):
                 cost = msg.total_cost_usd or 0.0
                 num_turns = getattr(msg, "num_turns", 0) or 0
             elif hasattr(msg, "content"):
-                content = (
-                    msg.content if isinstance(msg.content, str) else str(msg.content)
-                )
-                messages.append(content)
+                for text in _extract_text(msg.content):
+                    messages.append(text)
 
                 # Guard: interrupt if the agent goes off-rails
                 if is_off_rails and is_off_rails(messages):
@@ -244,7 +309,7 @@ async def call_fix(
         return "[dry-run] fix skipped", 0.0, 0
 
     policy = default_policy(worktree=Path(worktree_path))
-    messages, cost, num_turns = await _sdk_query(
+    messages, cost, num_turns = await _sdk_client_query(
         prompt,
         model=MODEL_OPUS,
         max_turns=MAX_TURNS_FIX,

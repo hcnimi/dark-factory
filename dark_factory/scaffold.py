@@ -153,7 +153,7 @@ def create_worktree(
     info.branch = f"dark-factory/{source_id_lower}"
     info.change_id = f"dark-factory-{source_id_lower}"
 
-    basename_result = Path(repo_root).name
+    basename_result = Path(repo_root).resolve().name
     info.worktree_path = str(
         Path(repo_root).parent / f"{basename_result}-df-{source_id_lower}"
     )
@@ -282,7 +282,11 @@ async def run_phase_3(
         f"   - Mark `[P]` if the task touches different files/modules than other tasks\n"
         f"   - Mark `[depends: N]` if the task builds on code written by task N\n"
         f"   - When in doubt, use `[depends: N]` — false sequential is safe, false parallel causes merge conflicts\n\n"
-        f"Output ONLY the three files with their headers, no extra commentary."
+        f"Write each file directly to disk using the Write tool:\n"
+        f"- {change_dir}/proposal.md\n"
+        f"- {specs_dir}/spec.md\n"
+        f"- {change_dir}/tasks.md\n\n"
+        f"Write all three files. Do not ask for confirmation."
     )
 
     from .agents import _sdk_query, MODEL_SONNET
@@ -295,18 +299,29 @@ async def run_phase_3(
     )
     result.scaffold_cost_usd = cost
 
-    # Parse and write the generated files
-    combined = "\n".join(messages)
-    files = _parse_scaffold_output(combined)
-
+    # The SDK model may write files directly via tool use, or return text output.
+    # Check disk first; only fall back to text parsing if files don't exist.
     if not dry_run:
-        for filename, content in files.items():
-            if filename == "proposal.md":
-                (change_dir / filename).write_text(content)
-            elif filename == "spec.md":
-                (specs_dir / filename).write_text(content)
-            elif filename == "tasks.md":
-                (change_dir / filename).write_text(content)
+        _written_by_model = {
+            "proposal.md": change_dir / "proposal.md",
+            "spec.md": specs_dir / "spec.md",
+            "tasks.md": change_dir / "tasks.md",
+        }
+        needs_parse = any(
+            not p.exists() or p.stat().st_size == 0
+            for p in _written_by_model.values()
+        )
+
+        if needs_parse:
+            combined = "\n".join(messages)
+            files = _parse_scaffold_output(combined)
+            for filename, content in files.items():
+                if filename == "proposal.md":
+                    (change_dir / filename).write_text(content)
+                elif filename == "spec.md":
+                    (specs_dir / filename).write_text(content)
+                elif filename == "tasks.md":
+                    (change_dir / filename).write_text(content)
 
     # Validate openspec
     result.openspec_validated = _validate_openspec(
