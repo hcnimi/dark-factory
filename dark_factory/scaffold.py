@@ -289,14 +289,17 @@ async def run_phase_3(
         f"Write all three files. Do not ask for confirmation."
     )
 
-    from .agents import _sdk_query, MODEL_SONNET
+    if dry_run:
+        messages, cost = [], 0.0
+    else:
+        from .agents import _sdk_query, MODEL_SONNET
 
-    messages, cost, _turns = await _sdk_query(
-        scaffold_prompt,
-        model=MODEL_SONNET,
-        max_turns=5,
-        allowed_tools=[],
-    )
+        messages, cost, _turns = await _sdk_query(
+            scaffold_prompt,
+            model=MODEL_SONNET,
+            max_turns=5,
+            allowed_tools=[],
+        )
     result.scaffold_cost_usd = cost
 
     # The SDK model may write files directly via tool use, or return text output.

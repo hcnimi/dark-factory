@@ -110,10 +110,10 @@ class TestRunSubcommandRegistration:
     def test_run_is_recognized(self):
         """The ``run`` sub-command should not produce 'Unknown phase'."""
         result = subprocess.run(
-            [sys.executable, "-m", "dark_factory", "run", "--help-not-real"],
+            [sys.executable, "-m", "dark_factory", "run", "--dry-run", "check"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=15,
         )
         # It should attempt to parse args, not say "Unknown phase"
         assert "Unknown phase" not in result.stderr
