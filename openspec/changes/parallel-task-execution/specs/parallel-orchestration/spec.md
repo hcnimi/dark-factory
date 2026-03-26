@@ -31,7 +31,7 @@ The system SHALL enforce a configurable maximum number of concurrent agents per 
 - **THEN** all tasks SHALL execute sequentially regardless of wave grouping
 
 ### Requirement: Worktree isolation for parallel agents
-The system SHALL create a temporary git worktree and branch for each parallel agent. The worktree SHALL be branched from the current HEAD of the main worktree. Worktrees and branches SHALL be cleaned up after use.
+The system SHALL create a temporary git worktree and branch for each parallel agent. The worktree SHALL be branched from the current HEAD of the main worktree. Worktrees and branches SHALL be cleaned up after use. Worktree path computation SHALL resolve symlinks via `Path.resolve()` before deriving sibling directory names, to prevent path mismatches when the repo root contains symlinks (e.g., Homebrew, pyenv, or mounted volumes).
 
 #### Scenario: Worktree creation
 - **WHEN** a parallel agent starts for issue "beads-042"
@@ -48,6 +48,10 @@ The system SHALL create a temporary git worktree and branch for each parallel ag
 #### Scenario: Cleanup safety net
 - **WHEN** the pipeline process exits unexpectedly
 - **THEN** an `atexit` handler SHALL attempt to remove any remaining parallel worktrees
+
+#### Scenario: Symlinked repo root
+- **WHEN** the repo root path contains symlinks (e.g., `/opt/homebrew/Cellar/...` symlinked from `/usr/local/...`)
+- **THEN** the system resolves to the canonical path via `Path.resolve()` before computing the worktree sibling directory location
 
 ### Requirement: Merge parallel branches after wave completion
 The system SHALL merge each parallel branch back into the main worktree sequentially after all agents in the wave finish. The merge SHALL use `git merge --no-edit`.
