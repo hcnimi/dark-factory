@@ -311,11 +311,11 @@ def _run_full_pipeline(argv: list[str]) -> None:
             state.worktree_path = str(worktree.resolve())
             state.branch = f"dark-factory/{source_id_lower}"
 
-            # Mark phases 0-4 as pre-completed
-            for p in (0, 1, 1.5, 2, 3, 4):
+            # Mark phases 0-5 as pre-completed (spec already approved)
+            for p in (0, 1, 1.5, 2, 3, 4, 5):
                 if not state.is_phase_completed(p):
                     state.completed_phases.append(p)
-            state.current_phase = 5
+            state.current_phase = 6
 
             for p, name in ((1, PHASE_NAMES[1]), (1.5, PHASE_NAMES[1.5]),
                             (2, PHASE_NAMES[2]), (3, PHASE_NAMES[3]),
@@ -548,8 +548,12 @@ def _run_full_pipeline(argv: list[str]) -> None:
             if holdout is not None and not holdout.passed:
                 warning = render_holdout_warning(holdout)
                 print(warning, file=sys.stderr)
-                resp = input().strip()
-                holdout_decision = parse_holdout_decision(resp)
+                if sys.stdin.isatty():
+                    resp = input().strip()
+                    holdout_decision = parse_holdout_decision(resp)
+                else:
+                    # Non-interactive: auto-continue
+                    holdout_decision = HoldoutDecision.CONTINUE
                 if holdout_decision == HoldoutDecision.ABORT:
                     raise PipelineError(8, "Aborted: holdout test failures")
                 elif holdout_decision == HoldoutDecision.INVESTIGATE:
@@ -591,9 +595,10 @@ def _run_full_pipeline(argv: list[str]) -> None:
                 check_items=ticket.acceptance_criteria,
             )
             print(checklist, file=sys.stderr)
-            print("\nPress Enter to continue, or 'skip' to skip:",
-                  file=sys.stderr)
-            input()
+            if sys.stdin.isatty():
+                print("\nPress Enter to continue, or 'skip' to skip:",
+                      file=sys.stderr)
+                input()
 
             state.completed_phases.append(10)
             state.current_phase = 11
