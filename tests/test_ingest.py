@@ -8,14 +8,18 @@ from unittest.mock import patch
 
 import pytest
 
+import subprocess
+
 from dark_factory.ingest import (
     TicketFields,
     _extract_ac_from_description,
     _extract_sections,
+    _fetch_jira_via_mcp,
     _parse_interview_response,
     _parse_yaml_frontmatter,
     extract_keywords,
     ingest_file,
+    ingest_from_spec,
     ingest_jira,
     search_codebase_for_keywords,
 )
@@ -379,3 +383,111 @@ class TestSearchCodebaseForKeywords:
         )
         # Same file found by both keywords, should appear only once
         assert len(results) == 1
+
+
+# ---------------------------------------------------------------------------
+# _fetch_jira_via_mcp error handling
+# ---------------------------------------------------------------------------
+
+class TestFetchJiraViaMcp:
+    @patch("dark_factory.ingest.subprocess.run")
+    def test_cli_not_found(self, mock_run):
+        mock_run.side_effect = FileNotFoundError
+        with pytest.raises(RuntimeError, match="jira CLI not found"):
+            _fetch_jira_via_mcp("PROJ-1")
+
+    @patch("dark_factory.ingest.subprocess.run")
+    def test_cli_timeout(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="jira", timeout=30)
+        with pytest.raises(RuntimeError, match="timed out"):
+            _fetch_jira_via_mcp("PROJ-1")
+
+    @patch("dark_factory.ingest.subprocess.run")
+    def test_cli_nonzero_exit(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["jira"], returncode=1, stdout="", stderr="not found"
+        )
+        with pytest.raises(RuntimeError, match="exit 1.*not found"):
+            _fetch_jira_via_mcp("PROJ-1")
+
+    @patch("dark_factory.ingest.subprocess.run")
+    def test_cli_bad_json(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["jira"], returncode=0, stdout="not json", stderr=""
+        )
+        with pytest.raises(RuntimeError, match="invalid JSON"):
+            _fetch_jira_via_mcp("PROJ-1")
+
+    @patch("dark_factory.ingest.subprocess.run")
+    def test_cli_success(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["jira"], returncode=0,
+            stdout='{"fields": {"summary": "Test"}}', stderr=""
+        )
+        result = _fetch_jira_via_mcp("PROJ-1")
+        assert result == {"fields": {"summary": "Test"}}
+
+
+# ---------------------------------------------------------------------------
+# ingest_from_spec
+# ---------------------------------------------------------------------------
+
+class TestIngestFromSpec:
+    def test_missing_directory(self):
+        with pytest.raises(FileNotFoundError, match="Spec directory not found"):
+            ingest_from_spec("/nonexistent/dir")
+
+    def test_missing_proposal(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="proposal.md not found"):
+            ingest_from_spec(str(tmp_path))
+
+    def test_basic_spec(self, tmp_path):
+        (tmp_path / "proposal.md").write_text(
+            "# Add dark mode toggle\n\n## Why\nUsers want dark mode.\n"
+        )
+        specs_dir = tmp_path / "specs" / "main"
+        specs_dir.mkdir(parents=True)
+        (specs_dir / "spec.md").write_text(
+            "### Requirement: Dark mode\n"
+            "- **GIVEN** the user is on settings\n"
+            "- **WHEN** they toggle dark mode\n"
+            "- **THEN** the UI switches to dark theme\n"
+        )
+        (tmp_path / "tasks.md").write_text("## 1. Implement toggle\n")
+
+        ticket = ingest_from_spec(str(tmp_path))
+        assert ticket.summary == "Add dark mode toggle"
+        assert "Users want dark mode" in ticket.description
+        assert len(ticket.acceptance_criteria) == 3
+        assert "GIVEN the user is on settings" in ticket.acceptance_criteria[0]
+
+    def test_multiple_specs(self, tmp_path):
+        (tmp_path / "proposal.md").write_text("# Feature X\n\n## Why\nReason.\n")
+        for cap in ("auth", "ui"):
+            d = tmp_path / "specs" / cap
+            d.mkdir(parents=True)
+            (d / "spec.md").write_text(
+                f"- **WHEN** {cap} action happens\n"
+                f"- **THEN** {cap} result occurs\n"
+            )
+
+        ticket = ingest_from_spec(str(tmp_path))
+        assert len(ticket.acceptance_criteria) == 4
+
+    def test_requirement_heading_fallback(self, tmp_path):
+        (tmp_path / "proposal.md").write_text("# Feature Y\n")
+        specs_dir = tmp_path / "specs" / "main"
+        specs_dir.mkdir(parents=True)
+        (specs_dir / "spec.md").write_text(
+            "### Requirement: Must validate input\n"
+            "### Requirement: Must log errors\n"
+        )
+
+        ticket = ingest_from_spec(str(tmp_path))
+        assert len(ticket.acceptance_criteria) == 2
+        assert "Must validate input" in ticket.acceptance_criteria[0]
+
+    def test_no_tasks_file(self, tmp_path):
+        (tmp_path / "proposal.md").write_text("# Feature Z\n")
+        ticket = ingest_from_spec(str(tmp_path))
+        assert ticket.summary == "Feature Z"

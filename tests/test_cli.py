@@ -74,6 +74,28 @@ class TestParseArgsFlags:
         assert result.resume is False
 
 
+class TestFromSpec:
+    def test_from_spec_flag(self):
+        result = parse_args(["--from-spec", "openspec/changes/dark-factory-dppt-88"])
+        assert result.from_spec == "openspec/changes/dark-factory-dppt-88"
+        assert result.source.kind == "spec"
+        assert result.source.id == "dark-factory-dppt-88"
+
+    def test_from_spec_equals_form(self):
+        result = parse_args(["--from-spec=path/to/spec"])
+        assert result.from_spec == "path/to/spec"
+        assert result.source.kind == "spec"
+
+    def test_from_spec_with_dry_run(self):
+        result = parse_args(["--from-spec", "spec/dir", "--dry-run"])
+        assert result.from_spec == "spec/dir"
+        assert result.dry_run is True
+
+    def test_from_spec_not_set_by_default(self):
+        result = parse_args(["SDLC-123"])
+        assert result.from_spec == ""
+
+
 class TestToolAvailability:
     def test_git_available(self):
         # git should be available in the test environment

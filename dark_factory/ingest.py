@@ -72,14 +72,12 @@ def _extract_ac_from_description(description: str) -> list[str]:
 
 
 def _fetch_jira_via_mcp(jira_key: str) -> dict[str, Any]:
-    """Fetch a Jira ticket using the MCP Jira tool.
+    """Fetch a Jira ticket using the jira CLI.
 
-    Returns the raw JSON response from the MCP tool.  In production this
-    is called via the Claude Code SDK's tool infrastructure; in the
-    orchestrator we shell out to the jira CLI or use the REST API.
+    Returns the parsed JSON response.  Raises RuntimeError on any failure
+    so callers get a clear Phase 1 error instead of silently proceeding
+    with empty data.
     """
-    # Uses jira CLI over MCP for portability -- MCP requires server setup,
-    # CLI works with standard Jira auth.
     try:
         result = subprocess.run(
             ["jira", "issue", "view", jira_key, "--raw"],
@@ -87,11 +85,27 @@ def _fetch_jira_via_mcp(jira_key: str) -> dict[str, Any]:
             text=True,
             timeout=30,
         )
-        if result.returncode == 0:
-            return json.loads(result.stdout)
-    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
-        pass
-    return {}
+    except FileNotFoundError:
+        raise RuntimeError(
+            "jira CLI not found. Install it "
+            "(https://github.com/ankitpokhrel/jira-cli) "
+            "or pass a spec file instead."
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"jira CLI timed out fetching {jira_key}")
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"jira CLI failed (exit {result.returncode}): "
+            f"{result.stderr.strip()}"
+        )
+
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"jira CLI returned invalid JSON for {jira_key}: {exc}"
+        )
 
 
 def ingest_jira(jira_key: str) -> TicketFields:
@@ -250,6 +264,81 @@ def ingest_file(file_path: str) -> TicketFields:
         components=components,
         constraints=constraints,
         raw_source=content[:5000],
+    )
+
+
+# ---------------------------------------------------------------------------
+# OpenSpec directory ingestion (for --from-spec pipeline path)
+# ---------------------------------------------------------------------------
+
+# Matches Gherkin-style steps in spec files: "- **GIVEN/WHEN/THEN** ..."
+_GHERKIN_STEP_RE = re.compile(
+    r"^\s*-\s*\*\*(GIVEN|WHEN|THEN)\*\*\s+(.+)",
+    re.MULTILINE,
+)
+
+
+def ingest_from_spec(spec_dir: str) -> TicketFields:
+    """Construct TicketFields from an approved openspec change directory.
+
+    Reads proposal.md for summary/description and specs/*/spec.md for
+    acceptance criteria.  Used by --from-spec to skip Phases 0-3.
+    """
+    base = Path(spec_dir)
+    if not base.is_dir():
+        raise FileNotFoundError(f"Spec directory not found: {spec_dir}")
+
+    proposal_path = base / "proposal.md"
+    if not proposal_path.exists():
+        raise FileNotFoundError(f"proposal.md not found in {spec_dir}")
+
+    proposal = proposal_path.read_text(encoding="utf-8")
+    tasks_path = base / "tasks.md"
+    tasks_text = tasks_path.read_text(encoding="utf-8") if tasks_path.exists() else ""
+
+    # Summary from first heading
+    sections = _extract_sections(proposal)
+    first_heading = _SECTION_RE.search(proposal)
+    summary = first_heading.group(1).strip() if first_heading else ""
+    if not summary and proposal.strip():
+        summary = proposal.strip().splitlines()[0][:200]
+
+    # Description from proposal "Why" or "What Changes" section
+    description = (
+        sections.get("why", "")
+        or sections.get("what changes", "")
+        or proposal
+    )
+
+    # Collect all spec files
+    specs_dir = base / "specs"
+    spec_texts: list[str] = []
+    if specs_dir.is_dir():
+        for spec_file in sorted(specs_dir.rglob("spec.md")):
+            spec_texts.append(spec_file.read_text(encoding="utf-8"))
+
+    # Extract acceptance criteria from Gherkin scenarios
+    acceptance_criteria: list[str] = []
+    for spec_text in spec_texts:
+        for match in _GHERKIN_STEP_RE.finditer(spec_text):
+            step = match.group(2).strip()
+            if step:
+                acceptance_criteria.append(f"{match.group(1)} {step}")
+
+    # Fallback: extract requirement headings if no Gherkin found
+    if not acceptance_criteria:
+        for spec_text in spec_texts:
+            for line in spec_text.splitlines():
+                if line.startswith("### Requirement:"):
+                    acceptance_criteria.append(
+                        line.replace("### Requirement:", "").strip()
+                    )
+
+    return TicketFields(
+        summary=summary,
+        description=description,
+        acceptance_criteria=acceptance_criteria,
+        raw_source=(proposal + "\n\n" + tasks_text)[:5000],
     )
 
 
