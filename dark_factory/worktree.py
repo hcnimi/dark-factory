@@ -35,7 +35,7 @@ def create_parallel_worktree(
     on branch `parallel/<issue_id>`.
     """
     branch_name = f"parallel/{issue_id}"
-    repo_path = Path(repo_root)
+    repo_path = Path(repo_root).resolve()
     worktree_path = str(
         repo_path.parent / f"{repo_path.name}-parallel-{issue_id}"
     )

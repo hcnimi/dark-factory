@@ -21,6 +21,7 @@ class ParsedArgs:
     source: SourceInfo
     dry_run: bool = False
     resume: bool = False
+    from_spec: str = ""
     missing_tools: list[str] = field(default_factory=list)
 
 
@@ -66,16 +67,39 @@ def parse_args(argv: list[str]) -> ParsedArgs:
         ["SDLC-123", "--resume"]
         ["specs/feature.md", "--dry-run"]
         ["add dark mode toggle"]
+        ["--from-spec", "openspec/changes/dark-factory-sdlc-123"]
     """
-    flags = {a for a in argv if a.startswith("--")}
-    positional = [a for a in argv if not a.startswith("--")]
+    # Extract --from-spec value before general flag/positional parsing
+    from_spec = ""
+    filtered: list[str] = []
+    skip_next = False
+    for i, arg in enumerate(argv):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--from-spec" and i + 1 < len(argv):
+            from_spec = argv[i + 1]
+            skip_next = True
+        elif arg.startswith("--from-spec="):
+            from_spec = arg.split("=", 1)[1]
+        else:
+            filtered.append(arg)
 
-    raw_source = " ".join(positional) if positional else ""
-    source = _classify_source(raw_source)
+    flags = {a for a in filtered if a.startswith("--")}
+    positional = [a for a in filtered if not a.startswith("--")]
+
+    if from_spec and not positional:
+        # Derive source from the spec directory name
+        change_id = Path(from_spec).name
+        source = SourceInfo(kind="spec", raw=from_spec, id=change_id)
+    else:
+        raw_source = " ".join(positional) if positional else ""
+        source = _classify_source(raw_source)
 
     return ParsedArgs(
         source=source,
         dry_run="--dry-run" in flags,
         resume="--resume" in flags,
+        from_spec=from_spec,
         missing_tools=_check_tools(),
     )

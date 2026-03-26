@@ -23,7 +23,9 @@ from .checkpoint import (
 )
 from .cli import parse_args
 from .explore import explore_codebase, prefetch_context
-from .ingest import TicketFields, ingest_file, ingest_inline, ingest_jira
+from .ingest import (
+    TicketFields, ingest_file, ingest_from_spec, ingest_inline, ingest_jira,
+)
 from .issues import create_issues, parse_tasks_md
 from .scaffold import run_phase_3, run_phase_4
 from .state import PipelineError, PipelineState
@@ -287,86 +289,131 @@ def _run_full_pipeline(argv: list[str]) -> None:
         source_id_lower = args.source.id
         external_ref = f"{args.source.kind}:{args.source.raw}"
 
-        # ── Phase 1: Source Ingestion ──────────────────────────────────
-        if not state.is_phase_completed(1):
-            async def _ingest() -> TicketFields:
-                if args.source.kind == "jira":
-                    return ingest_jira(args.source.raw)
-                elif args.source.kind == "file":
-                    return ingest_file(args.source.raw)
-                return await ingest_inline(args.source.raw, dry_run=state.dry_run)
+        # ── --from-spec fast path: skip Phases 1-4 ────────────────────
+        if args.from_spec:
+            spec_path = Path(args.from_spec)
+            ticket = ingest_from_spec(args.from_spec)
 
-            phase_start = time.monotonic()
-            ticket = asyncio.run(run_phase(state, 1, _ingest))
-            summary.add_phase(1, PHASE_NAMES[1],
-                              duration_s=time.monotonic() - phase_start)
+            # Derive change_id from directory name
+            change_id = spec_path.name
+            # Strip "dark-factory-" prefix to get source_id_lower
+            prefix = "dark-factory-"
+            source_id_lower = (
+                change_id[len(prefix):]
+                if change_id.startswith(prefix)
+                else change_id
+            )
+            external_ref = f"spec:{args.from_spec}"
+
+            # Resolve worktree: spec dir lives at
+            # <worktree>/openspec/changes/<change-id>/
+            worktree = spec_path.parent.parent.parent
+            state.worktree_path = str(worktree.resolve())
+            state.branch = f"dark-factory/{source_id_lower}"
+
+            # Mark phases 0-5 as pre-completed (spec already approved)
+            for p in (0, 1, 1.5, 2, 3, 4, 5):
+                if not state.is_phase_completed(p):
+                    state.completed_phases.append(p)
+            state.current_phase = 6
+
+            for p, name in ((1, PHASE_NAMES[1]), (1.5, PHASE_NAMES[1.5]),
+                            (2, PHASE_NAMES[2]), (3, PHASE_NAMES[3]),
+                            (4, PHASE_NAMES[4])):
+                summary.add_phase(p, name, duration_s=0)
+
+            change_dir = spec_path
+
         else:
-            # Resume: reconstruct ticket from source
-            if args.source.kind == "file":
-                ticket = ingest_file(args.source.raw)
+            # ── Phase 1: Source Ingestion ─────────────────────────────
+            if not state.is_phase_completed(1):
+                async def _ingest() -> TicketFields:
+                    if args.source.kind == "jira":
+                        return ingest_jira(args.source.raw)
+                    elif args.source.kind == "file":
+                        return ingest_file(args.source.raw)
+                    return await ingest_inline(
+                        args.source.raw, dry_run=state.dry_run)
+
+                phase_start = time.monotonic()
+                ticket = asyncio.run(run_phase(state, 1, _ingest))
+                summary.add_phase(1, PHASE_NAMES[1],
+                                  duration_s=time.monotonic() - phase_start)
             else:
-                ticket = TicketFields(summary=args.source.raw,
-                                      description=args.source.raw)
+                # Resume: reconstruct ticket from source
+                if args.source.kind == "file":
+                    ticket = ingest_file(args.source.raw)
+                else:
+                    ticket = TicketFields(summary=args.source.raw,
+                                          description=args.source.raw)
 
-        # ── Phase 1.5: Input Quality Gate ──────────────────────────────
-        if not state.is_phase_completed(1.5):
-            phase_start = time.monotonic()
-            readiness = asyncio.run(run_phase(
-                state, 1.5, run_phase_1_5, state, ticket,
-                dry_run=state.dry_run,
-            ))
-            summary.add_phase(1.5, PHASE_NAMES[1.5],
-                              duration_s=time.monotonic() - phase_start)
-            if readiness.status == "not_ready":
-                raise PipelineError(
-                    1.5, f"Input quality gate failed (score={readiness.score}): "
-                         f"{readiness.gaps}")
+            # ── Phase 1.5: Input Quality Gate ─────────────────────────
+            if not state.is_phase_completed(1.5):
+                phase_start = time.monotonic()
+                readiness = asyncio.run(run_phase(
+                    state, 1.5, run_phase_1_5, state, ticket,
+                    dry_run=state.dry_run,
+                ))
+                summary.add_phase(1.5, PHASE_NAMES[1.5],
+                                  duration_s=time.monotonic() - phase_start)
+                if readiness.status == "not_ready":
+                    raise PipelineError(
+                        1.5,
+                        f"Input quality gate failed "
+                        f"(score={readiness.score}): {readiness.gaps}")
 
-        # ── Phase 2: Codebase Exploration (2a + 2b) ────────────────────
-        if not state.is_phase_completed(2):
-            async def _explore():
-                bundle = prefetch_context(state.repo_root, ticket=ticket)
-                expl = await explore_codebase(
-                    state.repo_root, bundle, ticket, dry_run=state.dry_run)
-                return bundle, expl
+            # ── Phase 2: Codebase Exploration (2a + 2b) ───────────────
+            if not state.is_phase_completed(2):
+                async def _explore():
+                    bundle = prefetch_context(state.repo_root, ticket=ticket)
+                    expl = await explore_codebase(
+                        state.repo_root, bundle, ticket,
+                        dry_run=state.dry_run)
+                    return bundle, expl
 
-            phase_start = time.monotonic()
-            _bundle, exploration = asyncio.run(run_phase(state, 2, _explore))
-            exploration_output = exploration.get("exploration_output", "")
-            summary.add_phase(2, PHASE_NAMES[2],
-                              duration_s=time.monotonic() - phase_start)
+                phase_start = time.monotonic()
+                _bundle, exploration = asyncio.run(
+                    run_phase(state, 2, _explore))
+                exploration_output = exploration.get(
+                    "exploration_output", "")
+                summary.add_phase(2, PHASE_NAMES[2],
+                                  duration_s=time.monotonic() - phase_start)
 
-        # ── Phase 3: Scaffold & OpenSpec ───────────────────────────────
-        if not state.is_phase_completed(3):
-            phase_start = time.monotonic()
-            scaffold = asyncio.run(run_phase(
-                state, 3, run_phase_3,
-                state, source_id_lower, ticket.summary, ticket.description,
-                ticket.acceptance_criteria, external_ref, exploration_output,
-                dry_run=state.dry_run,
-            ))
-            summary.add_phase(3, PHASE_NAMES[3],
-                              duration_s=time.monotonic() - phase_start,
-                              cost_usd=scaffold.scaffold_cost_usd)
+            # ── Phase 3: Scaffold & OpenSpec ──────────────────────────
+            if not state.is_phase_completed(3):
+                phase_start = time.monotonic()
+                scaffold = asyncio.run(run_phase(
+                    state, 3, run_phase_3,
+                    state, source_id_lower, ticket.summary,
+                    ticket.description, ticket.acceptance_criteria,
+                    external_ref, exploration_output,
+                    dry_run=state.dry_run,
+                ))
+                summary.add_phase(3, PHASE_NAMES[3],
+                                  duration_s=time.monotonic() - phase_start,
+                                  cost_usd=scaffold.scaffold_cost_usd)
 
-        change_id = f"dark-factory-{source_id_lower}"
+            change_id = f"dark-factory-{source_id_lower}"
 
-        # ── Phase 4: Plan Review Gate ──────────────────────────────────
-        if not state.is_phase_completed(4):
-            phase_start = time.monotonic()
-            plan_review = asyncio.run(run_phase(
-                state, 4, run_phase_4,
-                state.worktree_path, change_id, external_ref, ticket.summary,
-                ticket.acceptance_criteria, exploration_output,
-                dry_run=state.dry_run,
-            ))
-            plan_review_verdict = plan_review.verdict
-            summary.add_phase(4, PHASE_NAMES[4],
-                              duration_s=time.monotonic() - phase_start,
-                              cost_usd=plan_review.review_cost_usd)
+            # ── Phase 4: Plan Review Gate ─────────────────────────────
+            if not state.is_phase_completed(4):
+                phase_start = time.monotonic()
+                plan_review = asyncio.run(run_phase(
+                    state, 4, run_phase_4,
+                    state.worktree_path, change_id, external_ref,
+                    ticket.summary, ticket.acceptance_criteria,
+                    exploration_output, dry_run=state.dry_run,
+                ))
+                plan_review_verdict = plan_review.verdict
+                summary.add_phase(4, PHASE_NAMES[4],
+                                  duration_s=time.monotonic() - phase_start,
+                                  cost_usd=plan_review.review_cost_usd)
 
-        # ── Read openspec artifacts from disk ──────────────────────────
-        change_dir = Path(state.worktree_path) / "openspec" / "changes" / change_id
+            # ── Read openspec artifacts from disk ─────────────────────
+            change_dir = (
+                Path(state.worktree_path) / "openspec" / "changes"
+                / change_id
+            )
         spec_text = _read_safe(change_dir / "specs" / "main" / "spec.md")
         tasks_text = _read_safe(change_dir / "tasks.md")
 
@@ -501,8 +548,12 @@ def _run_full_pipeline(argv: list[str]) -> None:
             if holdout is not None and not holdout.passed:
                 warning = render_holdout_warning(holdout)
                 print(warning, file=sys.stderr)
-                resp = input().strip()
-                holdout_decision = parse_holdout_decision(resp)
+                if sys.stdin.isatty():
+                    resp = input().strip()
+                    holdout_decision = parse_holdout_decision(resp)
+                else:
+                    # Non-interactive: auto-continue
+                    holdout_decision = HoldoutDecision.CONTINUE
                 if holdout_decision == HoldoutDecision.ABORT:
                     raise PipelineError(8, "Aborted: holdout test failures")
                 elif holdout_decision == HoldoutDecision.INVESTIGATE:
@@ -544,9 +595,10 @@ def _run_full_pipeline(argv: list[str]) -> None:
                 check_items=ticket.acceptance_criteria,
             )
             print(checklist, file=sys.stderr)
-            print("\nPress Enter to continue, or 'skip' to skip:",
-                  file=sys.stderr)
-            input()
+            if sys.stdin.isatty():
+                print("\nPress Enter to continue, or 'skip' to skip:",
+                      file=sys.stderr)
+                input()
 
             state.completed_phases.append(10)
             state.current_phase = 11

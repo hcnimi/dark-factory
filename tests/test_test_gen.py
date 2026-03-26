@@ -61,15 +61,23 @@ class TestCallTestGenDryRun:
 
 
 class TestCallTestGenSdkUnavailable:
-    """Without the SDK installed, _sdk_query returns a placeholder."""
+    """When the SDK is unavailable, _sdk_query returns a placeholder."""
 
-    def test_output_contains_sdk_unavailable(self):
+    def test_output_contains_sdk_unavailable(self, monkeypatch):
+        async def _fake_sdk_query(prompt, **kwargs):
+            return [f"[sdk-unavailable] prompt: {prompt[:200]}"], 0.0, 0
+
+        monkeypatch.setattr("dark_factory.agents._sdk_query", _fake_sdk_query)
         output, cost, num_turns = asyncio.run(
             call_test_gen("generate tests", worktree_path="/tmp", dry_run=False)
         )
         assert "sdk-unavailable" in output
 
-    def test_cost_is_zero_without_sdk(self):
+    def test_cost_is_zero_without_sdk(self, monkeypatch):
+        async def _fake_sdk_query(prompt, **kwargs):
+            return [f"[sdk-unavailable] prompt: {prompt[:200]}"], 0.0, 0
+
+        monkeypatch.setattr("dark_factory.agents._sdk_query", _fake_sdk_query)
         _, cost, _ = asyncio.run(
             call_test_gen("generate tests", worktree_path="/tmp", dry_run=False)
         )

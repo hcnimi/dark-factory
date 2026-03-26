@@ -12,7 +12,7 @@ The orchestrator SHALL execute phases as Python function calls. The LLM SHALL NO
 - **THEN** the orchestrator saves state to JSON and stops — no subsequent phases execute
 
 ### Requirement: CLI interface preserved
-The `/dark-factory` command SHALL accept the same arguments as today: `<jira-key>`, `<file-path>`, `"<description>"`, `--dry-run`, `--resume`. The markdown command SHALL delegate to `python3 -m dark_factory` and read structured JSON output.
+The `/dark-factory` command SHALL accept the same arguments as today: `<jira-key>`, `<file-path>`, `"<description>"`, `--dry-run`, `--resume`. The markdown command SHALL delegate to the `dark-factory run` CLI entry point (installed via `pip install -e .`) and read structured JSON output. The entry point SHALL be used instead of `python3 -m dark_factory` to ensure correct interpreter resolution through pyenv shims and Homebrew.
 
 #### Scenario: Jira key input
 - **WHEN** user runs `/dark-factory SDLC-123`
@@ -56,13 +56,39 @@ Phases 0 (tool discovery/arg parsing), 5 (human checkpoint), 6 (beads issue crea
 - **WHEN** Phase 6 executes with a parsed tasks list
 - **THEN** `bd create` CLI commands are invoked via `subprocess` for each task, and issue IDs are captured from JSON output — no LLM involved
 
+### Requirement: Human gates use pause-exit-resume in non-interactive mode
+The pipeline runs inside a Claude Code SDK subprocess where stdin is not a TTY. Human decision gates (Phases 5, 8 holdout, 10) SHALL NOT call `input()` when `sys.stdin.isatty()` is False. Instead, they SHALL save state and exit with `--resume` instructions, following the pause-exit-resume pattern for human-in-the-loop agent harnesses.
+
+#### Scenario: Phase 5 non-interactive pause
+- **WHEN** Phase 5 (plan review) executes and stdin is not a TTY
+- **THEN** the orchestrator saves state and exits with a message instructing the human to review the spec files and resume with `dark-factory run <source> --resume`
+
+#### Scenario: Phase 8 holdout gate non-interactive default
+- **WHEN** Phase 8 holdout tests fail and stdin is not a TTY
+- **THEN** the pipeline defaults to "investigate" (safe pause) rather than blocking on input, preserving human review without blocking the agent harness
+
+#### Scenario: Phase 10 always pauses
+- **WHEN** Phase 10 (local dev verification) executes
+- **THEN** the orchestrator saves state, prints the worktree path and branch name, and exits — regardless of whether stdin is a TTY. The human verifies locally, then runs `dark-factory run <source> --resume` to continue to Phase 11
+
+### Requirement: Dry-run mode skips all SDK calls
+When `--dry-run` is active, all phases that invoke SDK agents SHALL short-circuit with empty output and zero cost. Deterministic phases execute normally. This enables testing the full pipeline flow without consuming LLM tokens.
+
+#### Scenario: SDK phase in dry-run
+- **WHEN** any SDK-calling phase (1.5, 2b, 3, 4, 6.5, 7, 8, 9, 11) executes with `--dry-run`
+- **THEN** the agent wrapper returns empty messages, zero cost, and zero turns without invoking the SDK
+
+#### Scenario: Deterministic phase in dry-run
+- **WHEN** a deterministic phase (0, 1, 2a, 5, 6, 10) executes with `--dry-run`
+- **THEN** the phase executes normally (these phases consume zero LLM tokens regardless)
+
 ### Requirement: Incremental migration coexistence
 During migration Steps 1-3, the markdown command SHALL delegate completed phases to Python and handle remaining phases itself. No phase SHALL be split across runtimes.
 
 #### Scenario: Step 1 partial delegation
 - **WHEN** Step 1 is deployed
-- **THEN** Phases 0, 5, 6, 10 execute via `python3 -m dark_factory`, and Phases 1-4, 7-9, 11 execute in the markdown command
+- **THEN** Phases 0, 5, 6, 10 execute via `dark-factory run`, and Phases 1-4, 7-9, 11 execute in the markdown command
 
 #### Scenario: Step 4 full delegation
 - **WHEN** Step 4 is deployed
-- **THEN** the markdown command is a thin launcher (~50 lines) that calls `python3 -m dark_factory "$ARGUMENTS"` and all phases execute in Python
+- **THEN** the markdown command is a thin launcher (~50 lines) that calls `dark-factory run "$ARGUMENTS"` and all phases execute in Python
