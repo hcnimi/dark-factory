@@ -401,8 +401,25 @@ def _run_full_pipeline(argv: list[str]) -> None:
                 print(summary.render(), file=sys.stderr)
                 sys.exit(0)
 
-            # Read human decision from stdin
-            response = input().strip()
+            # Read human decision from stdin (or pause if non-interactive)
+            if sys.stdin.isatty():
+                response = input().strip()
+            else:
+                # Non-interactive: pause for human review via --resume
+                state.save()
+                print(
+                    "\nPipeline paused for plan review (non-interactive).\n"
+                    "Review the spec files, then resume with:\n"
+                    f"  dark-factory run {args.source.raw} --resume\n",
+                    file=sys.stderr,
+                )
+                summary.add_phase(5, PHASE_NAMES[5],
+                                  duration_s=time.monotonic() - phase_start,
+                                  status="paused")
+                summary.final_status = "paused"
+                summary.total_duration_s = time.monotonic() - pipeline_start
+                print(summary.render(), file=sys.stderr)
+                sys.exit(0)
             decision = parse_decision(response)
 
             if decision == Decision.ABORT:
@@ -501,7 +518,11 @@ def _run_full_pipeline(argv: list[str]) -> None:
             if holdout is not None and not holdout.passed:
                 warning = render_holdout_warning(holdout)
                 print(warning, file=sys.stderr)
-                resp = input().strip()
+                if sys.stdin.isatty():
+                    resp = input().strip()
+                else:
+                    # Non-interactive: default to investigate (safe pause)
+                    resp = "investigate"
                 holdout_decision = parse_holdout_decision(resp)
                 if holdout_decision == HoldoutDecision.ABORT:
                     raise PipelineError(8, "Aborted: holdout test failures")
@@ -532,7 +553,7 @@ def _run_full_pipeline(argv: list[str]) -> None:
                               duration_s=time.monotonic() - phase_start,
                               cost_usd=review_result.total_cost_usd)
 
-        # ── Phase 10: Local Dev Verification (sync) ────────────────────
+        # ── Phase 10: Local Dev Verification (pause-exit-resume) ───────
         if not state.is_phase_completed(10):
             phase_start = time.monotonic()
             claude_md = Path(state.worktree_path) / "CLAUDE.md"
@@ -544,15 +565,26 @@ def _run_full_pipeline(argv: list[str]) -> None:
                 check_items=ticket.acceptance_criteria,
             )
             print(checklist, file=sys.stderr)
-            print("\nPress Enter to continue, or 'skip' to skip:",
-                  file=sys.stderr)
-            input()
 
+            # Save state so --resume advances to Phase 11
             state.completed_phases.append(10)
             state.current_phase = 11
             state.save()
             summary.add_phase(10, PHASE_NAMES[10],
                               duration_s=time.monotonic() - phase_start)
+
+            print(
+                "\nPipeline paused for local verification.\n"
+                f"  Worktree: {state.worktree_path}\n"
+                f"  Branch:   {state.branch}\n"
+                "\nAfter verifying, resume with:\n"
+                f"  dark-factory run {args.source.raw} --resume\n",
+                file=sys.stderr,
+            )
+            summary.final_status = "paused"
+            summary.total_duration_s = time.monotonic() - pipeline_start
+            print(summary.render(), file=sys.stderr)
+            sys.exit(0)
 
         # ── Phase 11: PR Creation ──────────────────────────────────────
         pr_result = None
