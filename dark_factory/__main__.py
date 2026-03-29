@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -275,6 +276,7 @@ def _run_full_pipeline(argv: list[str]) -> None:
             source=args.source,
             repo_root=".",
             dry_run=args.dry_run,
+            max_cost_usd=args.max_cost,
         )
 
         if args.resume:
@@ -283,6 +285,7 @@ def _run_full_pipeline(argv: list[str]) -> None:
                 state = PipelineState.load(state_path)
                 state.error = None  # clear previous error for retry
 
+        state.pipeline_status = "running"
         summary.add_phase(0, PHASE_NAMES[0],
                           duration_s=time.monotonic() - phase_start)
 
@@ -512,6 +515,46 @@ def _run_full_pipeline(argv: list[str]) -> None:
                               duration_s=time.monotonic() - phase_start,
                               cost_usd=tdd_result.cost_usd)
 
+        # ── Phase 6.75: Sprint Contracts ─────────────────────────────
+        if not state.is_phase_completed(6.75):
+            from .pipeline import run_phase_6_75
+            phase_start = time.monotonic()
+            contracts_result = asyncio.run(run_phase(
+                state, 6.75, run_phase_6_75,
+                state, state.issues, state.worktree_path, spec_text,
+                dry_run=state.dry_run,
+            ))
+            state.sprint_contracts = [
+                {"task_id": c.task_id, "task_title": c.task_title,
+                 "approach": c.approach, "verification": c.verification,
+                 "acceptance_criteria": c.acceptance_criteria}
+                for c in contracts_result.contracts
+            ]
+            state.save()
+            summary.add_phase(6.75, "Sprint Contracts",
+                              duration_s=time.monotonic() - phase_start,
+                              cost_usd=contracts_result.cost_usd)
+
+        # ── Create draft PR for progress visibility ──────────────────
+        if not state.draft_pr_url and not state.dry_run:
+            from .pr import create_draft_pr
+            try:
+                draft_body = (
+                    f"## In Progress\n\n"
+                    f"**Source**: {external_ref}\n\n"
+                    f"Implementation in progress...\n\n"
+                    f"---\nAutomated by `/dark-factory`"
+                )
+                state.draft_pr_url = create_draft_pr(
+                    state.worktree_path, state.branch,
+                    f"[WIP] {source_id_lower}: {ticket.summary}",
+                    draft_body,
+                    dry_run=state.dry_run,
+                )
+                state.save()
+            except Exception:
+                pass  # draft PR is nice-to-have, don't fail pipeline
+
         # ── Phase 7: Implementation ────────────────────────────────────
         if not state.is_phase_completed(7):
             claude_md = Path(state.worktree_path) / "CLAUDE.md"
@@ -609,20 +652,69 @@ def _run_full_pipeline(argv: list[str]) -> None:
         # ── Phase 11: PR Creation ──────────────────────────────────────
         pr_result = None
         if not state.is_phase_completed(11):
-            issue_ids = [i["id"] for i in state.issues
-                         if i.get("type") != "epic"]
             phase_start = time.monotonic()
-            pr_result = asyncio.run(run_phase(
-                state, 11, run_phase_11,
-                state.repo_root, state.worktree_path, state.branch,
-                source_id_lower, ticket.summary, external_ref, issue_ids,
-                dry_run=state.dry_run,
-            ))
-            summary.add_phase(11, PHASE_NAMES[11],
-                              duration_s=time.monotonic() - phase_start,
-                              cost_usd=pr_result.cost_usd)
+
+            if state.draft_pr_url:
+                # Draft PR exists — push latest, update body, mark ready
+                from .pr import (
+                    PRResult, cleanup_state_file, generate_pr_body,
+                    get_diff_summary, mark_pr_ready, push_branch,
+                    remove_worktree,
+                )
+                if not state.dry_run:
+                    push_branch(state.worktree_path, state.branch)
+
+                change_id = f"dark-factory-{source_id_lower}"
+                diff_summary = "" if state.dry_run else get_diff_summary(
+                    state.worktree_path)
+                pr_body, body_cost = asyncio.run(generate_pr_body(
+                    diff_summary, source_id_lower, ticket.summary,
+                    external_ref, change_id, dry_run=state.dry_run,
+                ))
+
+                if not state.dry_run:
+                    subprocess.run(
+                        ["gh", "pr", "edit", "--body", pr_body],
+                        capture_output=True, text=True,
+                        cwd=state.worktree_path, timeout=30,
+                    )
+                    # Update title (remove [WIP] prefix)
+                    subprocess.run(
+                        ["gh", "pr", "edit", "--title",
+                         f"{source_id_lower}: {ticket.summary}"],
+                        capture_output=True, text=True,
+                        cwd=state.worktree_path, timeout=30,
+                    )
+                    mark_pr_ready(state.worktree_path)
+                    remove_worktree(state.repo_root, state.worktree_path)
+
+                cleanup_state_file(state.repo_root, source_id_lower)
+                pr_result = PRResult(
+                    pr_url=state.draft_pr_url, branch=state.branch,
+                    cost_usd=body_cost,
+                )
+
+                state.completed_phases.append(11)
+                state.current_phase = 12
+                state.save()
+                summary.add_phase(11, PHASE_NAMES[11],
+                                  duration_s=time.monotonic() - phase_start,
+                                  cost_usd=body_cost)
+            else:
+                # No draft PR — original behavior
+                pr_result = asyncio.run(run_phase(
+                    state, 11, run_phase_11,
+                    state.repo_root, state.worktree_path, state.branch,
+                    source_id_lower, ticket.summary, external_ref,
+                    dry_run=state.dry_run,
+                ))
+                summary.add_phase(11, PHASE_NAMES[11],
+                                  duration_s=time.monotonic() - phase_start,
+                                  cost_usd=pr_result.cost_usd)
 
         # ── Final output ──────────────────────────────────────────────
+        state.pipeline_status = "completed"
+        state.save()
         summary.final_status = "success"
         summary.total_duration_s = time.monotonic() - pipeline_start
         summary.total_cost_usd = state.total_cost_usd
@@ -638,6 +730,8 @@ def _run_full_pipeline(argv: list[str]) -> None:
         }, indent=2))
 
     except PipelineError as exc:
+        state.pipeline_status = "failed"
+        state.save()
         summary.final_status = "failed"
         summary.error_phase = exc.phase
         summary.error_message = str(exc)
@@ -645,6 +739,9 @@ def _run_full_pipeline(argv: list[str]) -> None:
         print(summary.render(), file=sys.stderr)
         sys.exit(1)
     except Exception as exc:
+        if "state" in dir():
+            state.pipeline_status = "failed"
+            state.save()
         summary.final_status = "failed"
         summary.error_phase = getattr(state, "current_phase", 0) if "state" in dir() else 0
         summary.error_message = str(exc)

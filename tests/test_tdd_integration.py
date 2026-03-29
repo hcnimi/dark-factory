@@ -281,8 +281,8 @@ class TestStateSerializationFloatPhases:
         assert state.current_phase == 6.5
         assert 6 in state.completed_phases
 
-    def test_phase_advancement_6_5_to_7(self, tmp_path):
-        """After phase 6.5, run_phase advances current_phase to 7."""
+    def test_phase_advancement_6_5_to_6_75(self, tmp_path):
+        """After phase 6.5, run_phase advances current_phase to 6.75."""
         source = SourceInfo(kind="jira", raw="T-1", id="t-1")
         state = PipelineState(
             source=source,
@@ -296,11 +296,11 @@ class TestStateSerializationFloatPhases:
 
         asyncio.run(run_phase(state, 6.5, noop))
 
-        assert state.current_phase == 7
+        assert state.current_phase == 6.75
         assert 6.5 in state.completed_phases
 
     def test_phase_advancement_full_sequence(self, tmp_path):
-        """Phase 5 -> 6 -> 6.5 -> 7 -> 8 advancement chain."""
+        """Phase 5 -> 6 -> 6.5 -> 6.75 -> 7 -> 8 advancement chain."""
         source = SourceInfo(kind="jira", raw="T-1", id="t-1")
         state = PipelineState(
             source=source,
@@ -319,12 +319,15 @@ class TestStateSerializationFloatPhases:
         assert state.current_phase == 6.5
 
         asyncio.run(run_phase(state, 6.5, noop))
+        assert state.current_phase == 6.75
+
+        asyncio.run(run_phase(state, 6.75, noop))
         assert state.current_phase == 7
 
         asyncio.run(run_phase(state, 7, noop))
         assert state.current_phase == 8
 
-        assert state.completed_phases == [0, 1, 2, 3, 4, 5, 6, 6.5, 7]
+        assert state.completed_phases == [0, 1, 2, 3, 4, 5, 6, 6.5, 6.75, 7]
 
     def test_float_phase_timing_key(self, tmp_path):
         """Phase timing for 6.5 is stored with string key '6.5'."""

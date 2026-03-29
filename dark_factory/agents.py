@@ -6,6 +6,7 @@ appropriate to the task type.  Returns (messages, cost_usd) tuple.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,15 @@ MAX_TURNS_FIX = 15
 MAX_TURNS_REVIEW = 10
 MAX_TURNS_PR_BODY = 3
 MAX_TURNS_QUALITY_GATE = 3
-MAX_TURNS_TEST_GEN = 10
+MAX_TURNS_TEST_GEN = 3
+
+# Timeout constants (seconds) — per-agent-role SDK call limits
+TIMEOUT_IMPLEMENT = 600
+TIMEOUT_FIX = 600
+TIMEOUT_REVIEW = 300
+TIMEOUT_TEST_GEN = 600
+TIMEOUT_PR_BODY = 120
+TIMEOUT_QUALITY_GATE = 120
 
 # Tool sets by agent role
 TOOLS_IMPLEMENT = ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]
@@ -79,6 +88,24 @@ def _build_permission_callback(policy: SecurityPolicy):
 
 
 # ---------------------------------------------------------------------------
+# Settings helper — neutralize hooks without --bare
+# ---------------------------------------------------------------------------
+
+import json as _json
+_NO_HOOKS_SETTINGS: str = _json.dumps({"hooks": {}})
+
+
+def _get_no_hooks_settings() -> str:
+    """Return inline JSON settings string that disables all hooks.
+
+    Without --bare the subprocess inherits user hooks (cmux, beads, etc.)
+    which can hang or produce unexpected output.  Passing this via
+    ClaudeCodeOptions.settings overrides them while preserving auth.
+    """
+    return _NO_HOOKS_SETTINGS
+
+
+# ---------------------------------------------------------------------------
 # SDK query() wrapper — used for bounded tasks (review, PR body)
 # ---------------------------------------------------------------------------
 
@@ -114,8 +141,15 @@ async def _sdk_query(
     cwd: str | None = None,
     system_prompt: str | None = None,
     policy: SecurityPolicy | None = None,
+    timeout: float | None = None,
 ) -> tuple[list[str], float, int]:
-    """Run a bounded SDK query() call and return (messages, cost_usd, num_turns)."""
+    """Run a bounded SDK query() call and return (messages, cost_usd, num_turns).
+
+    Skips --bare to preserve OAuth/keychain auth (bare mode requires
+    ANTHROPIC_API_KEY since Claude Code 2.1.x).  Uses a settings override
+    to disable hooks, and the parser patch handles unknown message types
+    (rate_limit_event, etc.) that surface without bare.
+    """
     try:
         from claude_code_sdk import ClaudeCodeOptions, ResultMessage, query
     except ImportError:
@@ -128,6 +162,7 @@ async def _sdk_query(
         max_turns=max_turns,
         allowed_tools=allowed_tools,
         permission_mode="bypassPermissions",
+        settings=_get_no_hooks_settings(),
     )
     if cwd:
         options.cwd = cwd
@@ -140,29 +175,22 @@ async def _sdk_query(
     cost = 0.0
     num_turns = 0
 
-    # DEBUG: log all message types
-    _debug_msgs: list[str] = []
-    async for msg in query(prompt=prompt, options=options):
-        _content = getattr(msg, 'content', None)
-        _block_info = ""
-        if isinstance(_content, list) and _content:
-            _block_info = f" blocks=[{', '.join(type(b).__name__ + ':' + str(list(vars(b).keys()) if hasattr(b, '__dict__') else dir(b))[:80] for b in _content[:3])}]"
-        _debug_msgs.append(f"{type(msg).__name__}: content_type={type(_content).__name__}{_block_info}")
-        if msg is None:
-            continue
-        if isinstance(msg, ResultMessage):
-            cost = msg.total_cost_usd or 0.0
-            num_turns = getattr(msg, "num_turns", 0) or 0
-        elif hasattr(msg, "content"):
-            extracted = _extract_text(msg.content)
-            _debug_msgs.append(f"  extracted {len(extracted)} texts, first 200: {extracted[0][:200] if extracted else '(empty)'}")
-            for text in extracted:
-                messages.append(text)
-    # Write debug log
-    from pathlib import Path as _P
-    _dbg = _P(".dark-factory") / "sdk_query_debug.txt"
-    _dbg.parent.mkdir(parents=True, exist_ok=True)
-    _dbg.write_text("\n".join(_debug_msgs) + f"\n\nTotal messages collected: {len(messages)}\nCost: {cost}\n")
+    async def _consume():
+        nonlocal cost, num_turns
+        async for msg in query(prompt=prompt, options=options):
+            if msg is None:
+                continue
+            if isinstance(msg, ResultMessage):
+                cost = msg.total_cost_usd or 0.0
+                num_turns = getattr(msg, "num_turns", 0) or 0
+            elif hasattr(msg, "content"):
+                for text in _extract_text(msg.content):
+                    messages.append(text)
+
+    if timeout is not None:
+        await asyncio.wait_for(_consume(), timeout=timeout)
+    else:
+        await _consume()
 
     return messages, cost, num_turns
 
@@ -194,11 +222,16 @@ async def _sdk_client_query(
     system_prompt: str | None = None,
     policy: SecurityPolicy | None = None,
     is_off_rails: Any | None = None,
+    timeout: float | None = None,
 ) -> tuple[list[str], float, int]:
     """Run an SDK ClaudeSDKClient session with interrupt() guard.
 
     If is_off_rails(messages) returns True during streaming, the client
     calls interrupt() to abort the runaway agent.
+
+    Skips --bare to preserve OAuth/keychain auth (bare mode requires
+    ANTHROPIC_API_KEY since Claude Code 2.1.x).  Uses a settings override
+    to disable hooks.
     """
     try:
         from claude_code_sdk import (
@@ -214,6 +247,7 @@ async def _sdk_client_query(
         max_turns=max_turns,
         allowed_tools=allowed_tools,
         permission_mode="bypassPermissions",
+        settings=_get_no_hooks_settings(),
     )
     if cwd:
         options.cwd = cwd
@@ -240,22 +274,29 @@ async def _sdk_client_query(
 
         actual_prompt = _as_stream()
 
-    try:
-        await client.connect(prompt=actual_prompt)
-        async for msg in client.receive_response():
-            if isinstance(msg, ResultMessage):
-                cost = msg.total_cost_usd or 0.0
-                num_turns = getattr(msg, "num_turns", 0) or 0
-            elif hasattr(msg, "content"):
-                for text in _extract_text(msg.content):
-                    messages.append(text)
+    async def _consume():
+        nonlocal cost, num_turns
+        try:
+            await client.connect(prompt=actual_prompt)
+            async for msg in client.receive_response():
+                if isinstance(msg, ResultMessage):
+                    cost = msg.total_cost_usd or 0.0
+                    num_turns = getattr(msg, "num_turns", 0) or 0
+                elif hasattr(msg, "content"):
+                    for text in _extract_text(msg.content):
+                        messages.append(text)
 
-                # Guard: interrupt if the agent goes off-rails
-                if is_off_rails and is_off_rails(messages):
-                    client.interrupt()
-                    break
-    finally:
-        await client.disconnect()
+                    # Guard: interrupt if the agent goes off-rails
+                    if is_off_rails and is_off_rails(messages):
+                        client.interrupt()
+                        break
+        finally:
+            await client.disconnect()
+
+    if timeout is not None:
+        await asyncio.wait_for(_consume(), timeout=timeout)
+    else:
+        await _consume()
 
     return messages, cost, num_turns
 
@@ -290,6 +331,7 @@ async def call_implement(
         system_prompt=system_prompt,
         policy=policy,
         is_off_rails=is_off_rails,
+        timeout=TIMEOUT_IMPLEMENT,
     )
     return "\n".join(messages), cost, num_turns
 
@@ -317,6 +359,7 @@ async def call_fix(
         cwd=worktree_path,
         system_prompt=system_prompt,
         policy=policy,
+        timeout=TIMEOUT_FIX,
     )
     return "\n".join(messages), cost, num_turns
 
@@ -344,6 +387,7 @@ async def call_review(
         allowed_tools=TOOLS_REVIEW,
         cwd=worktree_path,
         system_prompt=system_prompt,
+        timeout=TIMEOUT_REVIEW,
     )
     return "\n".join(messages), cost, num_turns
 
@@ -365,6 +409,7 @@ async def call_pr_body(
         model=MODEL_SONNET,
         max_turns=MAX_TURNS_PR_BODY,
         allowed_tools=TOOLS_NONE,
+        timeout=TIMEOUT_PR_BODY,
     )
     return "\n".join(messages), cost, num_turns
 
@@ -383,6 +428,7 @@ async def call_quality_gate(
         model=MODEL_SONNET,
         max_turns=MAX_TURNS_QUALITY_GATE,
         allowed_tools=TOOLS_NONE,
+        timeout=TIMEOUT_QUALITY_GATE,
     )
     return "\n".join(messages), cost, num_turns
 
@@ -391,6 +437,7 @@ async def call_test_gen(
     prompt: str,
     *,
     worktree_path: str,
+    system_prompt: str | None = None,
     dry_run: bool = False,
 ) -> tuple[str, float, int]:
     """Phase 6.5 test generation agent: sonnet, max_turns=10, read-only tools.
@@ -407,5 +454,7 @@ async def call_test_gen(
         max_turns=MAX_TURNS_TEST_GEN,
         allowed_tools=TOOLS_REVIEW,
         cwd=worktree_path,
+        system_prompt=system_prompt,
+        timeout=TIMEOUT_TEST_GEN,
     )
     return "\n".join(messages), cost, num_turns

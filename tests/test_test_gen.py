@@ -29,8 +29,8 @@ from dark_factory.state import PipelineState, SourceInfo
 class TestTestGenConstants:
     """Verify model, turns, and tools configuration for the test-gen agent."""
 
-    def test_max_turns_test_gen_is_10(self):
-        assert MAX_TURNS_TEST_GEN == 10
+    def test_max_turns_test_gen_is_3(self):
+        assert MAX_TURNS_TEST_GEN == 3
 
     def test_uses_sonnet_model(self):
         assert MODEL_SONNET == "sonnet"

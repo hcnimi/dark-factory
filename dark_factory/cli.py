@@ -22,6 +22,7 @@ class ParsedArgs:
     dry_run: bool = False
     resume: bool = False
     from_spec: str = ""
+    max_cost: float | None = None
     missing_tools: list[str] = field(default_factory=list)
 
 
@@ -69,8 +70,9 @@ def parse_args(argv: list[str]) -> ParsedArgs:
         ["add dark mode toggle"]
         ["--from-spec", "openspec/changes/dark-factory-sdlc-123"]
     """
-    # Extract --from-spec value before general flag/positional parsing
+    # Extract --from-spec and --max-cost values before general flag/positional parsing
     from_spec = ""
+    max_cost: float | None = None
     filtered: list[str] = []
     skip_next = False
     for i, arg in enumerate(argv):
@@ -82,6 +84,11 @@ def parse_args(argv: list[str]) -> ParsedArgs:
             skip_next = True
         elif arg.startswith("--from-spec="):
             from_spec = arg.split("=", 1)[1]
+        elif arg == "--max-cost" and i + 1 < len(argv):
+            max_cost = float(argv[i + 1])
+            skip_next = True
+        elif arg.startswith("--max-cost="):
+            max_cost = float(arg.split("=", 1)[1])
         else:
             filtered.append(arg)
 
@@ -101,5 +108,6 @@ def parse_args(argv: list[str]) -> ParsedArgs:
         dry_run="--dry-run" in flags,
         resume="--resume" in flags,
         from_spec=from_spec,
+        max_cost=max_cost,
         missing_tools=_check_tools(),
     )

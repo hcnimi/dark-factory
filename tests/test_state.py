@@ -99,6 +99,76 @@ class TestPipelineStateHelpers:
         assert state.next_phase() == 3
 
 
+class TestProgressReporting:
+    """Tests for pipeline_status, updated_at, and phase7_progress fields."""
+
+    def test_save_sets_updated_at(self, state):
+        assert state.updated_at == ""
+        state.save()
+        assert state.updated_at != ""
+        # Should be a valid ISO 8601 timestamp
+        from datetime import datetime
+        datetime.fromisoformat(state.updated_at)
+
+    def test_default_pipeline_status(self, state):
+        assert state.pipeline_status == "pending"
+
+    def test_pipeline_status_roundtrip(self, state):
+        state.pipeline_status = "running"
+        path = state.save()
+        loaded = PipelineState.load(path)
+        assert loaded.pipeline_status == "running"
+
+    def test_phase7_progress_roundtrip(self, state):
+        state.phase7_progress = {
+            "wave": 2,
+            "total_waves": 4,
+            "tasks_completed": 5,
+            "tasks_total": 12,
+            "wave_task_ids": ["issue-1", "issue-2"],
+        }
+        path = state.save()
+        loaded = PipelineState.load(path)
+        assert loaded.phase7_progress["wave"] == 2
+        assert loaded.phase7_progress["tasks_total"] == 12
+
+    def test_phase7_progress_null_by_default(self, state):
+        path = state.save()
+        loaded = PipelineState.load(path)
+        assert loaded.phase7_progress is None
+
+    def test_load_ignores_unknown_fields(self, state, tmp_path):
+        """Old state files with extra keys (from a newer version) load fine."""
+        state.save()
+        path = state._state_path()
+        data = json.loads(path.read_text())
+        data["some_future_field"] = "value"
+        path.write_text(json.dumps(data))
+        loaded = PipelineState.load(path)
+        assert loaded.source.id == "sdlc-123"
+
+    def test_load_uses_defaults_for_missing_fields(self, state, tmp_path):
+        """Old state files without new fields load with defaults."""
+        state.save()
+        path = state._state_path()
+        data = json.loads(path.read_text())
+        del data["pipeline_status"]
+        del data["updated_at"]
+        del data["phase7_progress"]
+        path.write_text(json.dumps(data))
+        loaded = PipelineState.load(path)
+        assert loaded.pipeline_status == "pending"
+        assert loaded.updated_at == ""
+        assert loaded.phase7_progress is None
+
+    def test_updated_at_changes_on_each_save(self, state):
+        state.save()
+        first = state.updated_at
+        state.save()
+        second = state.updated_at
+        assert second >= first
+
+
 class TestPipelineError:
     def test_message_includes_phase(self):
         err = PipelineError(phase=7, message="implementation failed")

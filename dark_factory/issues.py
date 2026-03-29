@@ -1,17 +1,14 @@
-"""Phase 6: beads issue creation from tasks.md.
+"""Phase 6: issue creation from tasks.md.
 
-Parses the task list, invokes ``bd create`` via subprocess for each task,
-and captures issue IDs from JSON output.  Zero LLM tokens consumed.
+Parses the task list, generates deterministic internal IDs (TASK-1, TASK-2, ...),
+and returns CreatedIssue objects.  Zero LLM tokens consumed, no subprocesses.
 """
 
 from __future__ import annotations
 
-import json
 import re
-import subprocess
 from collections import deque
 from dataclasses import dataclass, field
-from pathlib import Path
 
 
 @dataclass
@@ -65,7 +62,7 @@ def parse_tasks_md(text: str) -> list[str]:
         stripped = line.strip()
         if stripped and stripped[0].isdigit() and ". " in stripped:
             tasks.append(stripped.split(". ", 1)[1])
-        elif stripped.startswith("- "):
+        elif line.startswith("- "):
             task = stripped[2:]
             if task.startswith("[ ] ") or task.startswith("[x] "):
                 task = task[4:]
@@ -95,8 +92,8 @@ def parse_tasks_md_with_deps(text: str) -> list[ParsedTask]:
         # Numbered list: "1. Title" or "1. [P] Title"
         if stripped and stripped[0].isdigit() and ". " in stripped:
             title = stripped.split(". ", 1)[1]
-        # Bullet / checkbox list
-        elif stripped.startswith("- "):
+        # Bullet / checkbox list (only top-level, not indented sub-bullets)
+        elif line.startswith("- "):
             title = stripped[2:]
             if title.startswith("[ ] ") or title.startswith("[x] "):
                 title = title[4:]
@@ -202,37 +199,20 @@ class TaskDAG:
         return [[task_to_issue[idx] for idx in wave] for wave in waves]
 
 
-def _run_bd(args: list[str], dry_run: bool = False) -> dict:
-    """Run a ``bd`` command and return parsed JSON output.
+_task_counter = 0
 
-    In dry-run mode, returns a synthetic response without executing.
-    """
-    if dry_run:
-        title = ""
-        for i, a in enumerate(args):
-            if a == "create" and i + 1 < len(args):
-                title = args[i + 1]
-                break
-        return {"id": f"DRY-{abs(hash(title)) % 10000}", "title": title}
 
-    cmd = ["bd", *args]
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"bd command failed (exit {result.returncode}): {result.stderr.strip()}"
-        )
+def _next_task_id() -> str:
+    """Generate a deterministic internal task ID."""
+    global _task_counter
+    _task_counter += 1
+    return f"TASK-{_task_counter}"
 
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"bd returned non-JSON output: {result.stdout[:200]}"
-        ) from exc
+
+def _reset_task_counter() -> None:
+    """Reset the counter (for testing)."""
+    global _task_counter
+    _task_counter = 0
 
 
 def create_issues(
@@ -242,10 +222,11 @@ def create_issues(
     tasks: list[str],
     dry_run: bool = False,
 ) -> PhaseResult:
-    """Create beads issues for the task list.
+    """Create internal issues for the task list.
 
     Simple (1-2 tasks): creates standalone task issues.
     Multi-part (3+ tasks): creates an epic with child task issues.
+    IDs are deterministic (TASK-1, TASK-2, ...).
     """
     result = PhaseResult()
 
@@ -255,20 +236,7 @@ def create_issues(
     is_multi = len(tasks) >= 3
 
     if is_multi:
-        epic_data = _run_bd(
-            [
-                "create",
-                f"{source_id}: {summary}",
-                "-t",
-                "epic",
-                "--external-ref",
-                external_ref,
-                "--json",
-                "--silent",
-            ],
-            dry_run=dry_run,
-        )
-        epic_id = epic_data["id"]
+        epic_id = _next_task_id()
         result.epic_id = epic_id
         result.issues.append(
             CreatedIssue(
@@ -279,22 +247,10 @@ def create_issues(
         )
 
         for task_title in tasks:
-            task_data = _run_bd(
-                [
-                    "create",
-                    task_title,
-                    "-t",
-                    "task",
-                    "--parent",
-                    epic_id,
-                    "--json",
-                    "--silent",
-                ],
-                dry_run=dry_run,
-            )
+            task_id = _next_task_id()
             result.issues.append(
                 CreatedIssue(
-                    id=task_data["id"],
+                    id=task_id,
                     title=task_title,
                     issue_type="task",
                     parent_id=epic_id,
@@ -302,23 +258,11 @@ def create_issues(
             )
     else:
         for task_title in tasks:
-            task_data = _run_bd(
-                [
-                    "create",
-                    f"{source_id}: {task_title}",
-                    "-t",
-                    "task",
-                    "--external-ref",
-                    external_ref,
-                    "--json",
-                    "--silent",
-                ],
-                dry_run=dry_run,
-            )
+            task_id = _next_task_id()
             result.issues.append(
                 CreatedIssue(
-                    id=task_data["id"],
-                    title=task_title,
+                    id=task_id,
+                    title=f"{source_id}: {task_title}",
                     issue_type="task",
                 )
             )

@@ -14,10 +14,17 @@ from dark_factory.agents import (
     MAX_TURNS_REVIEW,
     MODEL_OPUS,
     MODEL_SONNET,
+    TIMEOUT_FIX,
+    TIMEOUT_IMPLEMENT,
+    TIMEOUT_PR_BODY,
+    TIMEOUT_QUALITY_GATE,
+    TIMEOUT_REVIEW,
+    TIMEOUT_TEST_GEN,
     TOOLS_IMPLEMENT,
     TOOLS_NONE,
     TOOLS_REVIEW,
     _build_permission_callback,
+    _sdk_query,
     call_fix,
     call_implement,
     call_pr_body,
@@ -62,6 +69,70 @@ class TestConstants:
 
     def test_no_tools_is_empty(self):
         assert TOOLS_NONE == []
+
+    def test_timeout_implement(self):
+        assert TIMEOUT_IMPLEMENT == 600
+
+    def test_timeout_fix(self):
+        assert TIMEOUT_FIX == 600
+
+    def test_timeout_review(self):
+        assert TIMEOUT_REVIEW == 300
+
+    def test_timeout_test_gen(self):
+        assert TIMEOUT_TEST_GEN == 600
+
+    def test_timeout_pr_body(self):
+        assert TIMEOUT_PR_BODY == 120
+
+    def test_timeout_quality_gate(self):
+        assert TIMEOUT_QUALITY_GATE == 120
+
+
+class TestSdkQueryTimeout:
+    """Verify that _sdk_query respects timeout parameter."""
+
+    def test_timeout_raises_on_slow_query(self):
+        """A query that exceeds timeout should raise TimeoutError."""
+
+        async def _slow_query(**kwargs):
+            await asyncio.sleep(10)
+            yield  # never reached
+
+        with patch("claude_code_sdk.query", _slow_query):
+            with pytest.raises(TimeoutError):
+                asyncio.run(
+                    _sdk_query(
+                        "test",
+                        model="sonnet",
+                        max_turns=3,
+                        allowed_tools=[],
+                        timeout=0.1,
+                    )
+                )
+
+    def test_no_timeout_completes_normally(self):
+        """When timeout=None, a fast query completes without error."""
+        from claude_code_sdk import ResultMessage
+
+        async def _fast_query(**kwargs):
+            msg = MagicMock(spec=ResultMessage)
+            msg.total_cost_usd = 0.01
+            msg.num_turns = 1
+            yield msg
+
+        with patch("claude_code_sdk.query", _fast_query):
+            msgs, cost, turns = asyncio.run(
+                _sdk_query(
+                    "test",
+                    model="sonnet",
+                    max_turns=3,
+                    allowed_tools=[],
+                    timeout=None,
+                )
+            )
+            assert cost == 0.01
+            assert turns == 1
 
 
 class TestBuildPermissionCallback:
