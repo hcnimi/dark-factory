@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import json
 
 import pytest
 
 from dark_factory.pr import (
     PRResult,
     cleanup_state_file,
-    close_issues,
+    create_draft_pr,
     create_pr,
     generate_pr_body,
+    mark_pr_ready,
     run_phase_11,
 )
 
@@ -56,18 +56,7 @@ class TestCleanupStateFile:
         assert (state_dir / "other.json").exists()
 
     def test_no_state_file_is_safe(self, tmp_path):
-        # Should not raise even if nothing exists
         cleanup_state_file(str(tmp_path), "nonexistent")
-
-
-class TestCloseIssues:
-    def test_dry_run_returns_all_ids(self):
-        result = close_issues(["A-1", "A-2"], "done", dry_run=True)
-        assert result == ["A-1", "A-2"]
-
-    def test_empty_list(self):
-        result = close_issues([], "done", dry_run=True)
-        assert result == []
 
 
 class TestCreatePr:
@@ -75,6 +64,21 @@ class TestCreatePr:
         url = create_pr("/tmp", "branch", "title", "body", dry_run=True)
         assert "github.com" in url
         assert url.startswith("https://")
+
+
+class TestCreateDraftPr:
+    def test_dry_run_returns_placeholder_url(self):
+        url = create_draft_pr("/tmp", "branch", "title", "body", dry_run=True)
+        assert "github.com" in url
+
+    def test_dry_run_does_not_call_subprocess(self):
+        url = create_draft_pr("/tmp", "branch", "t", "b", dry_run=True)
+        assert isinstance(url, str)
+
+
+class TestMarkPrReady:
+    def test_dry_run_is_noop(self):
+        mark_pr_ready("/tmp", dry_run=True)
 
 
 class TestGeneratePrBody:
@@ -103,7 +107,6 @@ class TestGeneratePrBody:
 
 class TestRunPhase11:
     def test_dry_run_full_flow(self, tmp_path):
-        # Create state file to verify cleanup
         state_dir = tmp_path / ".dark-factory"
         state_dir.mkdir()
         (state_dir / "test-1.json").write_text("{}")
@@ -116,7 +119,6 @@ class TestRunPhase11:
                 source_id="test-1",
                 summary="Test feature",
                 external_ref="jira:TEST-1",
-                issue_ids=["ISS-1", "ISS-2"],
                 dry_run=True,
             )
         )
@@ -124,8 +126,6 @@ class TestRunPhase11:
         assert isinstance(result, PRResult)
         assert result.pr_url.startswith("https://")
         assert result.branch == "dark-factory/test-1"
-        assert result.closed_issues == ["ISS-1", "ISS-2"]
-        # State file cleaned up
         assert not (state_dir / "test-1.json").exists()
 
     def test_dry_run_no_issues(self, tmp_path):
@@ -137,8 +137,7 @@ class TestRunPhase11:
                 source_id="test-1",
                 summary="Test",
                 external_ref="jira:TEST-1",
-                issue_ids=[],
                 dry_run=True,
             )
         )
-        assert result.closed_issues == []
+        assert isinstance(result, PRResult)

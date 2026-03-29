@@ -29,6 +29,7 @@ _PHASE_NAMES: dict[float, str] = {
     5: "Human Checkpoint",
     6: "Issue Creation",
     6.5: "Test Generation",
+    6.75: "Sprint Contracts",
     7: "Implementation",
     8: "Test & Dep Audit",
     9: "Implementation Review",
@@ -68,6 +69,45 @@ def _log_phase_event(
         pass  # best-effort logging
 
 
+def _log_task_event(
+    state: PipelineState,
+    event_type: str,
+    *,
+    task_id: str = "",
+    task_title: str = "",
+    wave: int | None = None,
+    success: bool | None = None,
+    duration_ms: int | None = None,
+) -> None:
+    """Append a structured JSONL event for task-level transitions.
+
+    Event types: task_start, task_complete, wave_start, wave_complete, task_skipped
+    """
+    event: dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event_type": event_type,
+    }
+    if task_id:
+        event["task_id"] = task_id
+    if task_title:
+        event["task_title"] = task_title
+    if wave is not None:
+        event["wave"] = wave
+    if success is not None:
+        event["success"] = success
+    if duration_ms is not None:
+        event["duration_ms"] = duration_ms
+
+    try:
+        events_dir = Path(state.repo_root) / ".dark-factory"
+        events_dir.mkdir(parents=True, exist_ok=True)
+        events_path = events_dir / f"{state.source.id}.events.jsonl"
+        with events_path.open("a") as f:
+            f.write(_json.dumps(event) + "\n")
+    except OSError:
+        pass
+
+
 async def run_phase(
     state: PipelineState,
     phase: float,
@@ -84,6 +124,7 @@ async def run_phase(
     PipelineError.
     """
     _log_phase_event(state, phase, "started")
+    state.pipeline_status = "running"
     start = time.monotonic()
     try:
         result = await fn(*args, **kwargs)
@@ -99,10 +140,13 @@ async def run_phase(
         elif phase == 6:
             state.current_phase = 6.5
         elif phase == 6.5:
+            state.current_phase = 6.75
+        elif phase == 6.75:
             state.current_phase = 7
         else:
             state.current_phase = int(phase) + 1
         state.save()
+        state.phase7_progress = None  # clear intra-phase detail
         _log_phase_event(
             state, phase, "completed", duration_ms=round(elapsed * 1000),
         )
@@ -112,12 +156,15 @@ async def run_phase(
     except Exception as exc:
         elapsed = time.monotonic() - start
         state.phase_timings[str(phase)] = round(elapsed, 3)
-        state.error = str(exc)
+        # TimeoutError has no message — provide a meaningful one
+        msg = str(exc) or f"{type(exc).__name__} after {elapsed:.0f}s"
+        state.error = msg
         state.save()  # preserve state for --resume
+        state.pipeline_status = "failed"
         _log_phase_event(
             state, phase, "failed", duration_ms=round(elapsed * 1000),
         )
-        raise PipelineError(phase, str(exc)) from exc
+        raise PipelineError(phase, msg) from exc
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -320,11 +367,19 @@ async def run_phase_6_5(
     if dry_run:
         return result
 
-    # Build the test generation prompt
+    # Build the test generation prompt — role goes in system_prompt to avoid
+    # prompt-injection detection when running without --bare mode.
     combined_specs = "\n\n---\n\n".join(spec_texts)
+
+    system_prompt = (
+        "You are a test generation agent for a software project. "
+        "Your job is to read specifications and generate test code that "
+        "validates the requirements. Follow the project's testing conventions."
+    )
+
     prompt = (
-        "You are a test generation agent. Read the following spec and generate "
-        "test code that validates the requirements.\n\n"
+        "Read the following spec and generate test code that validates "
+        "the requirements.\n\n"
         "## Specs\n"
         f"{combined_specs}\n\n"
         "## Instructions\n"
@@ -346,6 +401,7 @@ async def run_phase_6_5(
     output, cost, _turns = await call_test_gen(
         prompt,
         worktree_path=worktree_path,
+        system_prompt=system_prompt,
         dry_run=dry_run,
     )
     result.cost_usd = cost
@@ -405,7 +461,154 @@ def _extract_section(text: str, start_marker: str, end_marker: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Phase 7: Implementation — claim/implement/close loop
+# Phase 6.75: Sprint Contracts — pre-execution agreement
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class SprintContract:
+    """A contract for a single task: what to build, how to verify."""
+
+    task_id: str
+    task_title: str
+    approach: str = ""
+    verification: str = ""
+    acceptance_criteria: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Phase6_75Result:
+    """Outcome of Phase 6.75: sprint contract negotiation."""
+
+    contracts: list[SprintContract] = field(default_factory=list)
+    cost_usd: float = 0.0
+    validated: bool = False
+
+
+async def run_phase_6_75(
+    state: PipelineState,
+    issues: list[dict[str, Any]],
+    worktree_path: str,
+    spec_text: str = "",
+    *,
+    dry_run: bool = False,
+) -> Phase6_75Result:
+    """Phase 6.75: generate and validate sprint contracts before implementation.
+
+    For each non-epic issue, asks Sonnet to produce a contract describing what
+    will be built and how success will be verified. Then validates all contracts
+    against the spec.
+    """
+    import json as _json
+
+    from .agents import call_review
+
+    result = Phase6_75Result()
+    task_issues = [i for i in issues if i.get("type", "task") != "epic"]
+
+    if not task_issues or dry_run:
+        return result
+
+    # Generate contracts
+    task_list = "\n".join(
+        f"- {i.get('id', '?')}: {i.get('title', '')}" for i in task_issues
+    )
+    gen_prompt = (
+        "For each task below, produce a sprint contract describing:\n"
+        "1. **approach**: what will be built (implementation strategy)\n"
+        "2. **verification**: how success will be verified (test strategy)\n"
+        "3. **acceptance_criteria**: list of concrete, testable criteria\n\n"
+        f"## Spec\n{spec_text or '(no spec provided)'}\n\n"
+        f"## Tasks\n{task_list}\n\n"
+        "Return a JSON array of objects:\n"
+        "```json\n"
+        '[{"task_id": "...", "approach": "...", "verification": "...", '
+        '"acceptance_criteria": ["..."]}]\n'
+        "```\n"
+    )
+
+    gen_output, gen_cost, _ = await call_review(
+        gen_prompt, worktree_path=worktree_path, dry_run=dry_run,
+    )
+    result.cost_usd += gen_cost
+
+    # Parse contracts from response
+    contracts = _parse_contracts(gen_output, task_issues)
+    result.contracts = contracts
+
+    # Validate contracts against spec
+    if contracts and spec_text:
+        contract_summary = "\n".join(
+            f"- {c.task_id}: approach={c.approach[:100]}, "
+            f"criteria={len(c.acceptance_criteria)}"
+            for c in contracts
+        )
+        val_prompt = (
+            "Validate these sprint contracts against the spec. "
+            "Check for: missing requirements, contradictions, untestable criteria.\n\n"
+            f"## Spec\n{spec_text[:2000]}\n\n"
+            f"## Contracts\n{contract_summary}\n\n"
+            "Return VALIDATED if contracts are sufficient, or list issues."
+        )
+        val_output, val_cost, _ = await call_review(
+            val_prompt, worktree_path=worktree_path, dry_run=dry_run,
+        )
+        result.cost_usd += val_cost
+        result.validated = "VALIDATED" in val_output.upper()
+
+    return result
+
+
+def _parse_contracts(
+    text: str,
+    task_issues: list[dict[str, Any]],
+) -> list[SprintContract]:
+    """Extract SprintContract objects from the LLM response."""
+    import json as _json
+    import re
+
+    # Try to find JSON array in response
+    json_match = re.search(r"```(?:json)?\s*\n(.*?)\n\s*```", text, re.DOTALL)
+    raw = json_match.group(1) if json_match else text
+
+    if not json_match:
+        arr_match = re.search(r"\[.*\]", text, re.DOTALL)
+        if arr_match:
+            raw = arr_match.group(0)
+
+    try:
+        data = _json.loads(raw)
+        if not isinstance(data, list):
+            data = [data]
+    except (_json.JSONDecodeError, ValueError):
+        # Fallback: create empty contracts for each task
+        return [
+            SprintContract(
+                task_id=i.get("id", "?"),
+                task_title=i.get("title", ""),
+            )
+            for i in task_issues
+        ]
+
+    contracts = []
+    for item in data:
+        contracts.append(SprintContract(
+            task_id=item.get("task_id", ""),
+            task_title=next(
+                (i.get("title", "") for i in task_issues
+                 if i.get("id") == item.get("task_id")),
+                "",
+            ),
+            approach=item.get("approach", ""),
+            verification=item.get("verification", ""),
+            acceptance_criteria=item.get("acceptance_criteria", []),
+        ))
+
+    return contracts
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Phase 7: Implementation — implement loop
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
@@ -436,21 +639,6 @@ class Phase7Result:
     merge_conflicts: list[MergeConflict] = field(default_factory=list)
 
 
-def _run_bd(args: list[str], *, dry_run: bool = False) -> None:
-    """Run a bd command. Silently succeeds in dry-run mode."""
-    if dry_run:
-        return
-    try:
-        subprocess.run(
-            ["bd"] + args,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
-
-
 def _is_off_rails(messages: list[str]) -> bool:
     """Heuristic guard: detect when an implementation agent goes off-rails.
 
@@ -476,15 +664,32 @@ def _build_phase7_prompt(
     worktree_path: str,
     issue_id: str,
     issue_title: str,
+    sprint_contract: dict[str, Any] | None = None,
 ) -> str:
     """Build the implementation prompt for a single Phase 7 issue."""
-    return (
-        f"You are implementing a beads issue in a codebase.\n\n"
+    prompt = (
+        f"You are implementing an issue in a codebase.\n\n"
         f"## Working Directory\n"
         f"You are working in a git worktree at: {worktree_path}\n\n"
         f"## Your Issue\n"
         f"ID: {issue_id}\n"
         f"Title: {issue_title}\n\n"
+    )
+
+    if sprint_contract:
+        prompt += (
+            f"## Sprint Contract (agreed approach)\n"
+            f"Approach: {sprint_contract.get('approach', 'N/A')}\n"
+            f"Verification: {sprint_contract.get('verification', 'N/A')}\n"
+        )
+        ac = sprint_contract.get("acceptance_criteria", [])
+        if ac:
+            prompt += "Acceptance Criteria:\n"
+            for criterion in ac:
+                prompt += f"- {criterion}\n"
+        prompt += "\n"
+
+    prompt += (
         f"## Instructions\n"
         f"1. Read the repo's CLAUDE.md for conventions and test commands\n"
         f"2. Explore the codebase to understand relevant code and patterns\n"
@@ -505,6 +710,7 @@ def _build_phase7_prompt(
         f"Do NOT modify files unrelated to your issue.\n"
         f"Do NOT over-engineer — implement exactly what the issue asks for."
     )
+    return prompt
 
 
 def _run_targeted_tests(
@@ -580,12 +786,19 @@ async def _implement_single_task(
     issue_id = issue.get("id", "unknown")
     issue_title = issue.get("title", "")
 
-    _run_bd(["update", issue_id, "--claim"], dry_run=dry_run)
+    _log_task_event(state, "task_start", task_id=issue_id, task_title=issue_title)
+
+    # Find sprint contract for this task (if available)
+    contract = next(
+        (c for c in state.sprint_contracts if c.get("task_id") == issue_id),
+        None,
+    )
 
     prompt = _build_phase7_prompt(
         worktree_path=worktree_path,
         issue_id=issue_id,
         issue_title=issue_title,
+        sprint_contract=contract,
     )
 
     if state.visible_test_paths:
@@ -614,6 +827,22 @@ async def _implement_single_task(
     # Accumulate cost into pipeline state for observability
     state.total_cost_usd += impl_cost
 
+    # Cost circuit breaker
+    if (state.max_cost_usd is not None
+            and state.total_cost_usd > state.max_cost_usd):
+        import sys
+        print(
+            f"⚠️  Cost budget exceeded: ${state.total_cost_usd:.2f} > "
+            f"${state.max_cost_usd:.2f}",
+            file=sys.stderr,
+        )
+        state.save()
+        raise PipelineError(
+            7,
+            f"Cost budget exceeded: ${state.total_cost_usd:.2f} > "
+            f"${state.max_cost_usd:.2f}. Use --resume to continue.",
+        )
+
     impl_result = ImplementationResult(
         issue_id=issue_id,
         success=True,
@@ -631,11 +860,12 @@ async def _implement_single_task(
                 f"\n\n⚠️ Targeted test warning:\n{test_output[-1000:]}"
             )
 
-    _run_bd(
-        ["close", issue_id, "--reason",
-         f"Implemented in {state.branch}"],
-        dry_run=dry_run,
-    )
+    _log_task_event(state, "task_complete", task_id=issue_id, success=impl_result.success)
+
+    # Checkpoint completed task for partial resume
+    if impl_result.success:
+        state.phase7_completed_tasks.append(issue_id)
+        state.save()
 
     return impl_result
 
@@ -762,10 +992,17 @@ async def run_phase_7(
     if not task_issues:
         return result
 
+    # Skip tasks already completed on a previous run (partial resume)
+    completed = set(state.phase7_completed_tasks)
+
     # Check for dependency markers
     if not _has_dependency_markers(task_issues):
         # Sequential fallback -- preserve existing behavior
         for issue in task_issues:
+            if issue.get("id") in completed:
+                _log_task_event(state, "task_skipped", task_id=issue.get("id", ""),
+                               task_title=issue.get("title", ""))
+                continue
             impl_result = await _implement_single_task(
                 state, issue, worktree_path, system_prompt, dry_run=dry_run,
             )
@@ -796,15 +1033,22 @@ async def run_phase_7(
     # Track failed task indices for dependency skipping
     failed_indices: set[int] = set()
 
-    for wave in waves:
-        # Skip tasks whose dependencies failed
+    for wave_idx, wave in enumerate(waves):
+        # Skip tasks whose dependencies failed or already completed
         wave_issues = []
         for idx in wave:
+            issue = index_to_issue[idx]
+            if issue.get("id") in completed:
+                _log_task_event(state, "task_skipped", task_id=issue.get("id", ""),
+                               task_title=issue.get("title", ""))
+                continue
             task_deps = dag._edges.get(idx, set())
             failed_deps = task_deps & failed_indices
             if failed_deps:
                 issue = index_to_issue[idx]
                 issue_id = issue.get("id", "unknown")
+                _log_task_event(state, "task_skipped", task_id=issue_id,
+                               task_title=issue.get("title", ""))
                 result.results.append(ImplementationResult(
                     issue_id=issue_id,
                     success=False,
@@ -818,9 +1062,22 @@ async def run_phase_7(
         if not wave_issues:
             continue
 
+        state.phase7_progress = {
+            "wave": wave_idx + 1,
+            "total_waves": len(waves),
+            "tasks_completed": len(result.results),
+            "tasks_total": len(task_issues),
+            "wave_task_ids": [iss.get("id", "?") for iss in wave_issues],
+        }
+        state.save()
+
+        _log_task_event(state, "wave_start", wave=wave_idx + 1)
+
         wave_results, wave_conflicts = await _run_wave(
             state, wave_issues, worktree_path, system_prompt, dry_run=dry_run,
         )
+
+        _log_task_event(state, "wave_complete", wave=wave_idx + 1)
 
         # Record results and track failures
         for wr in wave_results:
@@ -833,6 +1090,9 @@ async def run_phase_7(
                         break
 
         result.merge_conflicts.extend(wave_conflicts)
+
+        state.phase7_progress["tasks_completed"] = len(result.results)
+        state.save()
 
     return result
 
@@ -857,6 +1117,65 @@ class ReviewResult:
 
 
 MAX_REVIEW_FIX_CYCLES = 1
+
+REVIEW_CALIBRATION = """\
+## Calibration Examples
+
+### Example 1: PASS — Correct code that looks suspicious
+```python
+# Calculating retry delay with exponential backoff
+delay = min(base_delay * (2 ** attempt), max_delay)
+time.sleep(delay + random.uniform(0, 0.1))  # jitter
+```
+Verdict: PASS
+Reasoning: The jitter addition looks like a bug (adding to delay) but is intentional \
+— it prevents thundering herd. The exponential backoff with cap is correct.
+
+### Example 2: NEEDS_FIX — Subtle logic error in clean code
+```python
+def is_valid_range(start, end, items):
+    \"\"\"Check if range [start, end] contains valid items.\"\"\"
+    return all(item.is_valid() for item in items[start:end])
+```
+Verdict: NEEDS_FIX
+Issues: Off-by-one error — Python slicing is [start:end) exclusive, but docstring \
+says [start, end] inclusive. Should be items[start:end+1].
+
+### Example 3: NEEDS_FIX — Security issue in working code
+```python
+def get_user_data(user_id, db):
+    query = f"SELECT * FROM users WHERE id = {user_id}"
+    return db.execute(query).fetchone()
+```
+Verdict: NEEDS_FIX
+Issues: SQL injection vulnerability. Must use parameterized query: \
+db.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+
+### Example 4: PASS — Intentional simplicity
+```python
+def retry(fn, max_attempts=3):
+    for i in range(max_attempts):
+        try:
+            return fn()
+        except Exception:
+            if i == max_attempts - 1:
+                raise
+```
+Verdict: PASS
+Reasoning: No backoff or jitter, but appropriate for a simple retry helper. \
+Adding complexity would be over-engineering for this use case.
+
+### Example 5: NEEDS_FIX — Race condition
+```python
+def get_or_create_cache(key, factory):
+    if key not in cache:
+        cache[key] = factory()
+    return cache[key]
+```
+Verdict: NEEDS_FIX
+Issues: TOCTOU race condition in concurrent environments. Between the check and the \
+set, another thread could create the same key. Use setdefault or a lock.
+"""
 
 
 async def run_phase_9(
@@ -901,6 +1220,7 @@ async def run_phase_9(
         f"Review this implementation against its spec.\n\n"
         f"## Spec\n{spec_text or '(no spec provided)'}\n\n"
         f"## Changes (git diff)\n```\n{diff_text[-8000:]}\n```\n\n"
+        f"{REVIEW_CALIBRATION}\n\n"
         f"Review for:\n"
         f"1. Spec compliance — does the code implement what the spec says?\n"
         f"2. Missing test coverage\n"

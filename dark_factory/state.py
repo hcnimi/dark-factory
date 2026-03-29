@@ -8,7 +8,7 @@ repo root.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -32,15 +32,22 @@ class PipelineState:
     completed_phases: list[float] = field(default_factory=list)
     worktree_path: str = ""
     branch: str = ""
+    draft_pr_url: str = ""
     epic_id: str | None = None
     issues: list[dict[str, Any]] = field(default_factory=list)
     phase_timings: dict[str, float] = field(default_factory=dict)
     total_cost_usd: float = 0.0
+    max_cost_usd: float | None = None  # None = unlimited
     dry_run: bool = False
     error: str | None = None
     visible_test_paths: list[str] = field(default_factory=list)
     holdout_test_paths: list[str] = field(default_factory=list)
     max_parallel: int = 3
+    pipeline_status: str = "pending"  # "pending" | "running" | "completed" | "failed"
+    updated_at: str = ""  # ISO 8601 timestamp, auto-set on save()
+    sprint_contracts: list[dict[str, Any]] = field(default_factory=list)
+    phase7_progress: dict[str, Any] | None = None  # wave/task detail during Phase 7
+    phase7_completed_tasks: list[str] = field(default_factory=list)  # issue IDs completed in Phase 7
 
     # -- persistence -------------------------------------------------------
 
@@ -52,6 +59,9 @@ class PipelineState:
 
     def save(self) -> Path:
         """Write state to .dark-factory/<KEY>.json.  Returns the path written."""
+        from datetime import datetime, timezone
+
+        self.updated_at = datetime.now(timezone.utc).isoformat()
         state_dir = self._state_dir()
         state_dir.mkdir(parents=True, exist_ok=True)
         path = self._state_path()
@@ -60,10 +70,16 @@ class PipelineState:
 
     @classmethod
     def load(cls, path: Path) -> PipelineState:
-        """Reconstruct state from a JSON file."""
+        """Reconstruct state from a JSON file.
+
+        Tolerates missing fields (uses defaults) and unknown fields
+        (drops them) so old state files work after schema changes.
+        """
         raw = json.loads(path.read_text())
         raw["source"] = SourceInfo(**raw["source"])
-        return cls(**raw)
+        known = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in raw.items() if k in known}
+        return cls(**filtered)
 
     # -- query helpers -----------------------------------------------------
 

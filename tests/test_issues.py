@@ -1,9 +1,6 @@
-"""Tests for dark_factory.issues: Phase 6 beads issue creation."""
+"""Tests for dark_factory.issues: Phase 6 issue creation."""
 
 from __future__ import annotations
-
-import json
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -14,6 +11,7 @@ from dark_factory.issues import (
     ParsedTask,
     PhaseResult,
     TaskDAG,
+    _reset_task_counter,
     create_issues,
     parse_tasks_md,
     parse_tasks_md_with_deps,
@@ -44,21 +42,36 @@ class TestParseTasksMd:
         text = "# Tasks\n\nOverview text\n\n1. First task\n2. Second task\n"
         assert parse_tasks_md(text) == ["First task", "Second task"]
 
+    def test_ignores_indented_sub_bullets(self):
+        text = "- Task A\n  - Sub-bullet\n- Task B\n"
+        assert parse_tasks_md(text) == ["Task A", "Task B"]
 
-class TestCreateIssuesDryRun:
-    """Dry-run mode must not invoke subprocess."""
+    def test_ignores_deeply_indented_sub_bullets(self):
+        text = "- Task A\n    - Deep sub-bullet\n      - Even deeper\n- Task B\n"
+        assert parse_tasks_md(text) == ["Task A", "Task B"]
 
-    def test_single_task_dry_run(self):
+    def test_checkbox_with_sub_bullets(self):
+        text = "- [ ] Task A\n  - detail\n- [x] Task B\n"
+        assert parse_tasks_md(text) == ["Task A", "Task B"]
+
+
+class TestCreateIssues:
+    """Internal ID generation — no subprocess."""
+
+    def setup_method(self):
+        _reset_task_counter()
+
+    def test_single_task(self):
         result = create_issues(
             source_id="SDLC-123",
             summary="Add caching",
             external_ref="jira:SDLC-123",
             tasks=["Implement cache"],
-            dry_run=True,
         )
         assert result.epic_id is None
         assert len(result.issues) == 1
         assert result.issues[0].issue_type == "task"
+        assert result.issues[0].id == "TASK-1"
 
     def test_multi_task_creates_epic(self):
         result = create_issues(
@@ -66,15 +79,14 @@ class TestCreateIssuesDryRun:
             summary="Add caching",
             external_ref="jira:SDLC-123",
             tasks=["Task A", "Task B", "Task C"],
-            dry_run=True,
         )
-        assert result.epic_id is not None
-        # 1 epic + 3 tasks
+        assert result.epic_id == "TASK-1"
         assert len(result.issues) == 4
         assert result.issues[0].issue_type == "epic"
-        for issue in result.issues[1:]:
+        for i, issue in enumerate(result.issues[1:], start=2):
             assert issue.issue_type == "task"
-            assert issue.parent_id == result.epic_id
+            assert issue.parent_id == "TASK-1"
+            assert issue.id == f"TASK-{i}"
 
     def test_two_tasks_no_epic(self):
         result = create_issues(
@@ -82,7 +94,6 @@ class TestCreateIssuesDryRun:
             summary="Small change",
             external_ref="jira:TEST-1",
             tasks=["Task A", "Task B"],
-            dry_run=True,
         )
         assert result.epic_id is None
         assert len(result.issues) == 2
@@ -93,83 +104,27 @@ class TestCreateIssuesDryRun:
             summary="Nothing",
             external_ref="jira:TEST-1",
             tasks=[],
-            dry_run=True,
         )
         assert result.epic_id is None
         assert result.issues == []
 
-    def test_dry_run_ids_are_deterministic(self):
-        """Same title should produce the same dry-run ID."""
-        r1 = create_issues("X-1", "S", "x:1", ["Do thing"], dry_run=True)
-        r2 = create_issues("X-1", "S", "x:1", ["Do thing"], dry_run=True)
+    def test_ids_are_deterministic_after_reset(self):
+        _reset_task_counter()
+        r1 = create_issues("X-1", "S", "x:1", ["Do thing"])
+        _reset_task_counter()
+        r2 = create_issues("X-1", "S", "x:1", ["Do thing"])
         assert r1.issues[0].id == r2.issues[0].id
 
+    def test_dry_run_same_behavior(self):
+        """dry_run flag is kept for API compat but behavior is identical."""
+        result = create_issues("X-1", "S", "x:1", ["task"], dry_run=True)
+        assert result.issues[0].id == "TASK-1"
 
-class TestCreateIssuesLive:
-    """Live mode invokes subprocess — mock it."""
-
-    @patch("dark_factory.issues.subprocess.run")
-    def test_single_task_calls_bd(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout=json.dumps({"id": "BD-42", "title": "Implement cache"}),
-        )
-
-        result = create_issues(
-            source_id="SDLC-1",
-            summary="Cache",
-            external_ref="jira:SDLC-1",
-            tasks=["Implement cache"],
-        )
-
-        assert mock_run.called
-        assert result.issues[0].id == "BD-42"
-
-    @patch("dark_factory.issues.subprocess.run")
-    def test_bd_failure_raises(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=1,
-            stderr="not found",
-        )
-
-        with pytest.raises(RuntimeError, match="bd command failed"):
-            create_issues("X-1", "S", "x:1", ["task"])
-
-    @patch("dark_factory.issues.subprocess.run")
-    def test_bd_non_json_raises(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="not json at all",
-        )
-
-        with pytest.raises(RuntimeError, match="non-JSON"):
-            create_issues("X-1", "S", "x:1", ["task"])
-
-    @patch("dark_factory.issues.subprocess.run")
-    def test_multi_task_creates_epic_then_children(self, mock_run):
-        call_count = 0
-
-        def fake_run(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            return MagicMock(
-                returncode=0,
-                stdout=json.dumps({"id": f"BD-{call_count}", "title": "t"}),
-            )
-
-        mock_run.side_effect = fake_run
-
-        result = create_issues(
-            source_id="S-1",
-            summary="Big feature",
-            external_ref="jira:S-1",
-            tasks=["A", "B", "C"],
-        )
-
-        # 1 epic create + 3 task creates = 4 calls
-        assert mock_run.call_count == 4
-        assert result.epic_id == "BD-1"
-        assert len(result.issues) == 4
+    def test_reset_counter(self):
+        create_issues("X-1", "S", "x:1", ["task"])
+        _reset_task_counter()
+        result = create_issues("X-2", "S", "x:2", ["task"])
+        assert result.issues[0].id == "TASK-1"
 
 
 class TestParseTasksMdWithDeps:
@@ -230,6 +185,19 @@ class TestParseTasksMdWithDeps:
         result = parse_tasks_md_with_deps(text)
         assert result[0] == ParsedTask(1, "Create schema", [])
         assert result[1] == ParsedTask(2, "Run migration", [1])
+
+    def test_ignores_indented_sub_bullets(self):
+        text = "- [P] Task A\n  - Sub-bullet\n- [depends: 1] Task B\n"
+        result = parse_tasks_md_with_deps(text)
+        assert len(result) == 2
+        assert result[0] == ParsedTask(index=1, title="Task A", dependencies=[])
+        assert result[1] == ParsedTask(index=2, title="Task B", dependencies=[1])
+
+    def test_sub_bullets_dont_affect_task_indexing(self):
+        text = "- [P] Task A\n  - Sub-bullet 1\n  - Sub-bullet 2\n- Task B\n"
+        result = parse_tasks_md_with_deps(text)
+        assert len(result) == 2
+        assert result[1] == ParsedTask(index=2, title="Task B", dependencies=[1])
 
 
 class TestTaskDAG:

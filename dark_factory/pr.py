@@ -7,7 +7,7 @@ creates the PR with gh, removes the worktree, and closes beads issues.
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +19,6 @@ class PRResult:
     pr_url: str = ""
     branch: str = ""
     cost_usd: float = 0.0
-    closed_issues: list[str] = field(default_factory=list)
 
 
 def _run_git(args: list[str], cwd: str, *, timeout: int = 30) -> str:
@@ -144,6 +143,59 @@ def create_pr(
     return result.stdout.strip()
 
 
+def create_draft_pr(
+    worktree_path: str,
+    branch: str,
+    title: str,
+    body: str,
+    *,
+    dry_run: bool = False,
+) -> str:
+    """Push branch and create a draft PR. Returns the PR URL."""
+    if dry_run:
+        return "https://github.com/example/repo/pull/0"
+
+    push_branch(worktree_path, branch)
+
+    result = subprocess.run(
+        [
+            "gh", "pr", "create",
+            "--title", title,
+            "--body", body,
+            "--head", branch,
+            "--draft",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=worktree_path,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"gh pr create --draft failed (exit {result.returncode}): "
+            f"{result.stderr.strip()}"
+        )
+    return result.stdout.strip()
+
+
+def mark_pr_ready(
+    worktree_path: str,
+    *,
+    dry_run: bool = False,
+) -> None:
+    """Convert a draft PR to ready for review."""
+    if dry_run:
+        return
+
+    subprocess.run(
+        ["gh", "pr", "ready"],
+        capture_output=True,
+        text=True,
+        cwd=worktree_path,
+        timeout=30,
+    )
+
+
 def remove_worktree(repo_root: str, worktree_path: str) -> None:
     """Remove the worktree (branch is preserved for the PR)."""
     try:
@@ -156,26 +208,6 @@ def remove_worktree(repo_root: str, worktree_path: str) -> None:
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
-
-
-def close_issues(issue_ids: list[str], reason: str, *, dry_run: bool = False) -> list[str]:
-    """Close beads issues with the given reason. Returns IDs successfully closed."""
-    if dry_run:
-        return list(issue_ids)
-
-    closed: list[str] = []
-    for issue_id in issue_ids:
-        try:
-            subprocess.run(
-                ["bd", "close", issue_id, "--reason", reason],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            closed.append(issue_id)
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            continue
-    return closed
 
 
 def cleanup_state_file(repo_root: str, source_id: str) -> None:
@@ -200,7 +232,6 @@ async def run_phase_11(
     source_id: str,
     summary: str,
     external_ref: str,
-    issue_ids: list[str],
     *,
     dry_run: bool = False,
 ) -> PRResult:
@@ -238,13 +269,6 @@ async def run_phase_11(
     # Remove worktree (branch preserved for PR)
     if not dry_run:
         remove_worktree(repo_root, worktree_path)
-
-    # Close issues
-    if issue_ids:
-        closed = close_issues(
-            issue_ids, f"PR: {pr_url}", dry_run=dry_run
-        )
-        result.closed_issues = closed
 
     # Cleanup state file
     cleanup_state_file(repo_root, source_id)

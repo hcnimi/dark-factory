@@ -211,10 +211,12 @@ class TestStateFileStructure:
         # Top-level keys must match dataclass fields
         expected_keys = {
             "source", "repo_root", "current_phase", "completed_phases",
-            "worktree_path", "branch", "epic_id", "issues", "phase_timings",
-            "total_cost_usd", "dry_run", "error",
-            "visible_test_paths", "holdout_test_paths",
-            "max_parallel",
+            "worktree_path", "branch", "draft_pr_url", "epic_id", "issues",
+            "phase_timings", "total_cost_usd", "max_cost_usd", "dry_run",
+            "error", "visible_test_paths", "holdout_test_paths",
+            "max_parallel", "sprint_contracts",
+            "pipeline_status", "updated_at", "phase7_progress",
+            "phase7_completed_tasks",
         }
         assert set(data.keys()) == expected_keys
 
