@@ -1040,6 +1040,18 @@ def _has_dependency_markers(issues: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _validate_task_completion(issue_id: str, worktree_path: str) -> bool:
+    """Check if a completed task has a corresponding git checkpoint commit."""
+    try:
+        result = subprocess.run(
+            ["git", "log", "--oneline", "--all", "--grep", issue_id],
+            capture_output=True, text=True, cwd=worktree_path, timeout=10,
+        )
+        return bool(result.stdout.strip())
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+
 async def run_phase_7(
     state: PipelineState,
     issues: list[dict[str, Any]],
@@ -1077,10 +1089,21 @@ async def run_phase_7(
     if not _has_dependency_markers(task_issues):
         # Sequential fallback -- preserve existing behavior
         for issue in task_issues:
-            if issue.get("id") in completed:
-                _log_task_event(state, "task_skipped", task_id=issue.get("id", ""),
-                               task_title=issue.get("title", ""))
-                continue
+            issue_id = issue.get("id", "unknown")
+            if issue_id in completed:
+                # Validate: check git checkpoint exists
+                if not dry_run and not _validate_task_completion(issue_id, worktree_path):
+                    # Ghost completion — remove and re-implement
+                    state.phase7_completed_tasks = [
+                        t for t in state.phase7_completed_tasks if t != issue_id
+                    ]
+                    completed.discard(issue_id)
+                    _log_task_event(state, "task_invalidated", task_id=issue_id,
+                                   task_title=issue.get("title", ""))
+                else:
+                    _log_task_event(state, "task_skipped", task_id=issue_id,
+                                   task_title=issue.get("title", ""))
+                    continue
             impl_result = await _implement_single_task(
                 state, issue, worktree_path, system_prompt,
                 dry_run=dry_run, task_timeout=per_task_timeout,
@@ -1118,9 +1141,17 @@ async def run_phase_7(
         for idx in wave:
             issue = index_to_issue[idx]
             if issue.get("id") in completed:
-                _log_task_event(state, "task_skipped", task_id=issue.get("id", ""),
-                               task_title=issue.get("title", ""))
-                continue
+                if not dry_run and not _validate_task_completion(issue.get("id", ""), worktree_path):
+                    state.phase7_completed_tasks = [
+                        t for t in state.phase7_completed_tasks if t != issue.get("id")
+                    ]
+                    completed.discard(issue.get("id"))
+                    _log_task_event(state, "task_invalidated", task_id=issue.get("id", ""),
+                                   task_title=issue.get("title", ""))
+                else:
+                    _log_task_event(state, "task_skipped", task_id=issue.get("id", ""),
+                                   task_title=issue.get("title", ""))
+                    continue
             task_deps = dag._edges.get(idx, set())
             failed_deps = task_deps & failed_indices
             if failed_deps:
