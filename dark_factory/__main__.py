@@ -226,6 +226,56 @@ def _read_safe(path: Path) -> str:
         return ""
 
 
+def _validate_phase_artifacts(state: PipelineState, phase: float) -> bool:
+    """Verify that a 'completed' phase actually produced expected artifacts.
+
+    Returns False for ghost completions (0ms duration, no artifacts).
+    """
+    # Ghost completion detection: phases that completed impossibly fast
+    timing = state.phase_timings.get(str(phase), 0)
+    if timing < 0.1 and phase in (6.5, 6.75, 7, 8, 9):
+        return False
+
+    if phase == 6.5:
+        return bool(state.visible_test_paths or state.holdout_test_paths)
+    elif phase == 6.75:
+        return bool(state.sprint_contracts)
+    elif phase == 7:
+        return bool(state.phase7_completed_tasks)
+    elif phase == 8:
+        return timing > 0.1
+    elif phase == 9:
+        return timing > 0.1
+    return True  # other phases don't need artifact validation
+
+
+def _should_run_phase(state: PipelineState, phase: float) -> bool:
+    """Check if a phase should run, accounting for ghost completions.
+
+    Returns True if the phase is not completed, or if it was completed
+    but has missing artifacts (auto-invalidates ghost completions).
+    """
+    if not state.is_phase_completed(phase):
+        return True
+
+    if not _validate_phase_artifacts(state, phase):
+        import sys
+        phase_name = {
+            6.5: "Test Generation", 6.75: "Sprint Contracts",
+            7: "Implementation", 8: "Test & Dep Audit",
+            9: "Implementation Review",
+        }.get(phase, f"Phase {phase}")
+        print(
+            f"\u26a0\ufe0f  Re-running {phase_name} (Phase {phase}): "
+            f"previous completion produced no artifacts",
+            file=sys.stderr,
+        )
+        state.completed_phases.remove(phase)
+        return True
+
+    return False
+
+
 def _run_full_pipeline(argv: list[str]) -> None:
     """Execute the full Dark Factory pipeline end-to-end.
 
@@ -526,7 +576,7 @@ def _run_full_pipeline(argv: list[str]) -> None:
                               duration_s=time.monotonic() - phase_start)
 
         # ── Phase 6.5: Test Generation ─────────────────────────────────
-        if not state.is_phase_completed(6.5):
+        if _should_run_phase(state, 6.5):
             spec_texts = [spec_text] if spec_text else []
             phase_start = time.monotonic()
             tdd_result = asyncio.run(run_phase(
@@ -539,7 +589,7 @@ def _run_full_pipeline(argv: list[str]) -> None:
                               cost_usd=tdd_result.cost_usd)
 
         # ── Phase 6.75: Sprint Contracts ─────────────────────────────
-        if not state.is_phase_completed(6.75):
+        if _should_run_phase(state, 6.75):
             from .pipeline import run_phase_6_75
             phase_start = time.monotonic()
             contracts_result = asyncio.run(run_phase(
@@ -579,7 +629,7 @@ def _run_full_pipeline(argv: list[str]) -> None:
                 pass  # draft PR is nice-to-have, don't fail pipeline
 
         # ── Phase 7: Implementation ────────────────────────────────────
-        if not state.is_phase_completed(7):
+        if _should_run_phase(state, 7):
             claude_md = Path(state.worktree_path) / "CLAUDE.md"
             sys_prompt = _read_safe(claude_md) or None
             phase_start = time.monotonic()
@@ -593,7 +643,7 @@ def _run_full_pipeline(argv: list[str]) -> None:
                               cost_usd=impl_result.total_cost_usd)
 
         # ── Phase 8: Test & Dep Audit ──────────────────────────────────
-        if not state.is_phase_completed(8):
+        if _should_run_phase(state, 8):
             claude_md = Path(state.worktree_path) / "CLAUDE.md"
             claude_md_text = _read_safe(claude_md)
             phase_start = time.monotonic()
@@ -638,7 +688,7 @@ def _run_full_pipeline(argv: list[str]) -> None:
             print(f"WARNING: {diff_report.warning}", file=sys.stderr)
 
         # ── Phase 9: Implementation Review ─────────────────────────────
-        if not state.is_phase_completed(9):
+        if _should_run_phase(state, 9):
             phase_start = time.monotonic()
             review_result = asyncio.run(run_phase(
                 state, 9, run_phase_9,
