@@ -258,6 +258,8 @@ def _run_full_pipeline(argv: list[str]) -> None:
     ticket: TicketFields | None = None
     exploration_output: str = ""
     plan_review_verdict: str = "PASS"
+    session_lock = None  # assigned after lock acquisition; released in finally
+    from .lock import acquire_lock, release_lock
 
     try:
         # ── Phase 0: Arg parsing, tool checks, state init ──────────────
@@ -288,6 +290,14 @@ def _run_full_pipeline(argv: list[str]) -> None:
         state.pipeline_status = "running"
         summary.add_phase(0, PHASE_NAMES[0],
                           duration_s=time.monotonic() - phase_start)
+
+        # Session locking — prevent concurrent runs on the same session
+        import uuid
+
+        run_id = str(uuid.uuid4())
+        state.run_id = run_id
+        state_dir = Path(state.repo_root) / ".dark-factory"
+        session_lock = acquire_lock(state_dir, state.source.id, run_id)
 
         source_id_lower = args.source.id
         external_ref = f"{args.source.kind}:{args.source.raw}"
@@ -748,6 +758,9 @@ def _run_full_pipeline(argv: list[str]) -> None:
         summary.total_duration_s = time.monotonic() - pipeline_start
         print(summary.render(), file=sys.stderr)
         sys.exit(1)
+    finally:
+        if session_lock is not None:
+            release_lock(session_lock)
 
 
 if __name__ == "__main__":

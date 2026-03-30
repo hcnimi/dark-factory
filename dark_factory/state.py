@@ -48,6 +48,7 @@ class PipelineState:
     sprint_contracts: list[dict[str, Any]] = field(default_factory=list)
     phase7_progress: dict[str, Any] | None = None  # wave/task detail during Phase 7
     phase7_completed_tasks: list[str] = field(default_factory=list)  # issue IDs completed in Phase 7
+    run_id: str = ""  # UUID for the current pipeline run
 
     # -- persistence -------------------------------------------------------
 

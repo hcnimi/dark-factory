@@ -216,7 +216,7 @@ class TestStateFileStructure:
             "error", "visible_test_paths", "holdout_test_paths",
             "max_parallel", "sprint_contracts",
             "pipeline_status", "updated_at", "phase7_progress",
-            "phase7_completed_tasks",
+            "phase7_completed_tasks", "run_id",
         }
         assert set(data.keys()) == expected_keys
 
