@@ -34,6 +34,11 @@ TIMEOUT_TEST_GEN = 600
 TIMEOUT_PR_BODY = 120
 TIMEOUT_QUALITY_GATE = 120
 
+# Dynamic timeout parameters for Phase 7
+TIMEOUT_IMPLEMENT_BASE = 120        # base overhead (seconds)
+TIMEOUT_IMPLEMENT_PER_TASK = 300    # per-task budget (seconds)
+COST_CEILING_DEFAULT = 20.0         # default max cost (USD)
+
 # Tool sets by agent role
 TOOLS_IMPLEMENT = ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]
 TOOLS_REVIEW = ["Read", "Glob", "Grep"]
@@ -329,6 +334,7 @@ async def call_implement(
     system_prompt: str | None = None,
     is_off_rails: Any | None = None,
     dry_run: bool = False,
+    timeout_override: float | None = None,
 ) -> tuple[str, float, int]:
     """Phase 7 implementation agent: opus, max_turns=30, edit tools, security.
 
@@ -348,7 +354,7 @@ async def call_implement(
         system_prompt=system_prompt,
         policy=policy,
         is_off_rails=is_off_rails,
-        timeout=TIMEOUT_IMPLEMENT,
+        timeout=timeout_override or TIMEOUT_IMPLEMENT,
     )
     return "\n".join(messages), cost, num_turns
 

@@ -49,6 +49,7 @@ class PipelineState:
     phase7_progress: dict[str, Any] | None = None  # wave/task detail during Phase 7
     phase7_completed_tasks: list[str] = field(default_factory=list)  # issue IDs completed in Phase 7
     run_id: str = ""  # UUID for the current pipeline run
+    task_timeout: float | None = None  # per-task timeout override (seconds)
 
     # -- persistence -------------------------------------------------------
 

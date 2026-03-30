@@ -299,6 +299,8 @@ def _run_full_pipeline(argv: list[str]) -> None:
                 print(summary.render(), file=sys.stderr)
                 sys.exit(1)
 
+        if args.task_timeout is not None:
+            state.task_timeout = args.task_timeout
         summary.add_phase(0, PHASE_NAMES[0],
                           duration_s=time.monotonic() - phase_start)
 
