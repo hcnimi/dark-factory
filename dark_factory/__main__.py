@@ -286,6 +286,17 @@ def _run_full_pipeline(argv: list[str]) -> None:
                 state.error = None  # clear previous error for retry
 
         state.pipeline_status = "running"
+
+        if not state.dry_run:
+            from .agents import verify_sdk_available
+            try:
+                verify_sdk_available()
+            except ImportError as exc:
+                summary.error_phase = 0
+                summary.error_message = str(exc)
+                print(summary.render(), file=sys.stderr)
+                sys.exit(1)
+
         summary.add_phase(0, PHASE_NAMES[0],
                           duration_s=time.monotonic() - phase_start)
 
