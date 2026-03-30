@@ -286,6 +286,8 @@ def _run_full_pipeline(argv: list[str]) -> None:
                 state.error = None  # clear previous error for retry
 
         state.pipeline_status = "running"
+        if args.task_timeout is not None:
+            state.task_timeout = args.task_timeout
         summary.add_phase(0, PHASE_NAMES[0],
                           duration_s=time.monotonic() - phase_start)
 

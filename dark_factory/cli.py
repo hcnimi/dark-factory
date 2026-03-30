@@ -23,6 +23,7 @@ class ParsedArgs:
     resume: bool = False
     from_spec: str = ""
     max_cost: float | None = None
+    task_timeout: float | None = None
     missing_tools: list[str] = field(default_factory=list)
 
 
@@ -73,6 +74,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
     # Extract --from-spec and --max-cost values before general flag/positional parsing
     from_spec = ""
     max_cost: float | None = None
+    task_timeout: float | None = None
     filtered: list[str] = []
     skip_next = False
     for i, arg in enumerate(argv):
@@ -89,6 +91,11 @@ def parse_args(argv: list[str]) -> ParsedArgs:
             skip_next = True
         elif arg.startswith("--max-cost="):
             max_cost = float(arg.split("=", 1)[1])
+        elif arg == "--task-timeout" and i + 1 < len(argv):
+            task_timeout = float(argv[i + 1])
+            skip_next = True
+        elif arg.startswith("--task-timeout="):
+            task_timeout = float(arg.split("=", 1)[1])
         else:
             filtered.append(arg)
 
@@ -109,5 +116,6 @@ def parse_args(argv: list[str]) -> ParsedArgs:
         resume="--resume" in flags,
         from_spec=from_spec,
         max_cost=max_cost,
+        task_timeout=task_timeout,
         missing_tools=_check_tools(),
     )

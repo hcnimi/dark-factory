@@ -6,6 +6,7 @@ about which phase to run next.
 
 from __future__ import annotations
 
+import asyncio
 import json as _json
 import subprocess
 import time
@@ -779,6 +780,7 @@ async def _implement_single_task(
     system_prompt: str | None,
     *,
     dry_run: bool = False,
+    task_timeout: float = 600,
 ) -> ImplementationResult:
     """Implement a single issue -- extracted from the Phase 7 loop."""
     from .agents import call_implement
@@ -816,13 +818,34 @@ async def _implement_single_task(
                 tdd_section += f"### {p.name}\n```\n{p.read_text()}\n```\n\n"
         prompt += tdd_section
 
-    impl_output, impl_cost, _num_turns = await call_implement(
-        prompt,
-        worktree_path=worktree_path,
-        system_prompt=system_prompt,
-        is_off_rails=_is_off_rails,
-        dry_run=dry_run,
-    )
+    task_start = time.monotonic()
+    try:
+        impl_output, impl_cost, _num_turns = await asyncio.wait_for(
+            call_implement(
+                prompt,
+                worktree_path=worktree_path,
+                system_prompt=system_prompt,
+                is_off_rails=_is_off_rails,
+                dry_run=dry_run,
+                timeout_override=task_timeout,
+            ),
+            timeout=task_timeout + 30,  # grace period over SDK timeout
+        )
+    except asyncio.TimeoutError:
+        elapsed = time.monotonic() - task_start
+        _log_task_event(state, "task_complete", task_id=issue_id, success=False,
+                       duration_ms=round(elapsed * 1000))
+        return ImplementationResult(
+            issue_id=issue_id,
+            success=False,
+            output=f"Task timed out after {elapsed:.0f}s (limit: {task_timeout}s)",
+            cost_usd=0.0,
+        )
+
+    task_elapsed = time.monotonic() - task_start
+    # Emit progress event
+    _log_task_event(state, "task_progress", task_id=issue_id,
+                   duration_ms=round(task_elapsed * 1000))
 
     # Accumulate cost into pipeline state for observability
     state.total_cost_usd += impl_cost
@@ -877,6 +900,7 @@ async def _run_wave(
     system_prompt: str | None,
     *,
     dry_run: bool = False,
+    task_timeout: float = 600,
 ) -> tuple[list[ImplementationResult], list[MergeConflict]]:
     """Execute a wave of tasks, respecting max_parallel.
 
@@ -891,7 +915,8 @@ async def _run_wave(
 
     if len(wave_issues) == 1:
         result = await _implement_single_task(
-            state, wave_issues[0], main_worktree, system_prompt, dry_run=dry_run,
+            state, wave_issues[0], main_worktree, system_prompt,
+            dry_run=dry_run, task_timeout=task_timeout,
         )
         return [result], []
 
@@ -915,7 +940,8 @@ async def _run_wave(
         # Run all tasks in the batch concurrently
         coros = [
             _implement_single_task(
-                state, issue, wt_path, system_prompt, dry_run=dry_run,
+                state, issue, wt_path, system_prompt,
+                dry_run=dry_run, task_timeout=task_timeout,
             )
             for issue, wt_path, _branch in worktrees
         ]
@@ -989,6 +1015,15 @@ async def run_phase_7(
     # Filter out epics
     task_issues = [i for i in issues if i.get("type", "task") != "epic"]
 
+    from .agents import TIMEOUT_IMPLEMENT, TIMEOUT_IMPLEMENT_PER_TASK, COST_CEILING_DEFAULT
+
+    task_count = len(task_issues)
+    per_task_timeout = state.task_timeout or min(TIMEOUT_IMPLEMENT, TIMEOUT_IMPLEMENT_PER_TASK)
+
+    # Apply cost ceiling if no explicit budget set
+    if state.max_cost_usd is None:
+        state.max_cost_usd = COST_CEILING_DEFAULT
+
     if not task_issues:
         return result
 
@@ -1004,7 +1039,8 @@ async def run_phase_7(
                                task_title=issue.get("title", ""))
                 continue
             impl_result = await _implement_single_task(
-                state, issue, worktree_path, system_prompt, dry_run=dry_run,
+                state, issue, worktree_path, system_prompt,
+                dry_run=dry_run, task_timeout=per_task_timeout,
             )
             result.results.append(impl_result)
             result.total_cost_usd += impl_result.cost_usd
@@ -1074,7 +1110,8 @@ async def run_phase_7(
         _log_task_event(state, "wave_start", wave=wave_idx + 1)
 
         wave_results, wave_conflicts = await _run_wave(
-            state, wave_issues, worktree_path, system_prompt, dry_run=dry_run,
+            state, wave_issues, worktree_path, system_prompt,
+            dry_run=dry_run, task_timeout=per_task_timeout,
         )
 
         _log_task_event(state, "wave_complete", wave=wave_idx + 1)
