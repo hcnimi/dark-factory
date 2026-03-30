@@ -411,7 +411,11 @@ async def run_phase_6_5(
     holdout_content = _extract_section(output, "HOLDOUT_TESTS_START", "HOLDOUT_TESTS_END")
 
     if not visible_content and not holdout_content:
-        return result
+        raise PipelineError(
+            6.5,
+            "Test generation produced no test content from non-empty spec. "
+            f"Agent output (first 500 chars): {output[:500]}"
+        )
 
     # Single-scenario guard: when spec has only 1 scenario, all tests
     # must be visible (no holdout split possible). Merge any holdout
@@ -435,11 +439,19 @@ async def run_phase_6_5(
     if visible_content:
         visible_path = test_dir_path / f"visible_tests_{source_id}.py"
         visible_path.write_text(visible_content)
+        if not visible_path.exists() or visible_path.stat().st_size == 0:
+            raise PipelineError(
+                6.5, f"Failed to write visible test file: {visible_path}"
+            )
         result.visible_test_paths.append(str(visible_path))
 
     if holdout_content:
         holdout_path = test_dir_path / f"holdout_tests_{source_id}.py"
         holdout_path.write_text(holdout_content)
+        if not holdout_path.exists() or holdout_path.stat().st_size == 0:
+            raise PipelineError(
+                6.5, f"Failed to write holdout test file: {holdout_path}"
+            )
         result.holdout_test_paths.append(str(holdout_path))
 
     # Persist to state
