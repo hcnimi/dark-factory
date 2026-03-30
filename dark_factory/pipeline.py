@@ -58,6 +58,8 @@ def _log_phase_event(
     }
     if duration_ms is not None:
         event["duration_ms"] = duration_ms
+    if state.run_id:
+        event["run_id"] = state.run_id
 
     try:
         events_dir = Path(state.repo_root) / ".dark-factory"
@@ -97,6 +99,8 @@ def _log_task_event(
         event["success"] = success
     if duration_ms is not None:
         event["duration_ms"] = duration_ms
+    if state.run_id:
+        event["run_id"] = state.run_id
 
     try:
         events_dir = Path(state.repo_root) / ".dark-factory"
