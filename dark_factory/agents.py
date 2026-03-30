@@ -240,7 +240,12 @@ async def _sdk_client_query(
             ResultMessage,
         )
     except ImportError:
-        return [f"[sdk-unavailable] prompt: {prompt[:200]}"], 0.0, 0
+        if dry_run:
+            return [f"[sdk-unavailable] prompt: {prompt[:200]}"], 0.0, 0
+        raise ImportError(
+            "claude-code-sdk is required but not installed. "
+            "Run: pip install claude-code-sdk"
+        )
 
     options = ClaudeCodeOptions(
         model=model,
