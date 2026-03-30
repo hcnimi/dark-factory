@@ -10,6 +10,7 @@ from dark_factory.agents import (
     MAX_TURNS_TEST_GEN,
     MODEL_SONNET,
     TOOLS_REVIEW,
+    _sdk_query,
     call_test_gen,
 )
 from dark_factory.pipeline import (
@@ -58,6 +59,25 @@ class TestCallTestGenDryRun:
             call_test_gen("any prompt", worktree_path="/tmp", dry_run=True)
         )
         assert cost == 0.0
+
+
+class TestSdkQueryRaisesOnMissingSDK:
+    """Verify _sdk_query raises ImportError when SDK is unavailable."""
+
+    def test_sdk_query_raises_import_error(self, monkeypatch):
+        import builtins
+        original_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if name == "claude_code_sdk":
+                raise ImportError("No module named 'claude_code_sdk'")
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", mock_import)
+        with pytest.raises(ImportError, match="claude-code-sdk is required"):
+            asyncio.run(
+                _sdk_query("test", model="sonnet", max_turns=1, allowed_tools=[])
+            )
 
 
 class TestCallTestGenSdkUnavailable:

@@ -816,6 +816,7 @@ async def _implement_single_task(
                 tdd_section += f"### {p.name}\n```\n{p.read_text()}\n```\n\n"
         prompt += tdd_section
 
+    impl_start = time.monotonic()
     impl_output, impl_cost, _num_turns = await call_implement(
         prompt,
         worktree_path=worktree_path,
@@ -823,6 +824,32 @@ async def _implement_single_task(
         is_off_rails=_is_off_rails,
         dry_run=dry_run,
     )
+    impl_elapsed = time.monotonic() - impl_start
+
+    # Validate: fail if agent returned instantly with no meaningful output
+    if impl_elapsed < 1.0 and not impl_output.strip():
+        _log_task_event(state, "task_complete", task_id=issue_id, success=False,
+                       duration_ms=round(impl_elapsed * 1000))
+        return ImplementationResult(
+            issue_id=issue_id, success=False,
+            output="Agent returned in <1s with no output (ghost completion)",
+            cost_usd=impl_cost,
+        )
+
+    # Validate: check for actual file changes
+    if not dry_run:
+        diff_check = subprocess.run(
+            ["git", "diff", "--stat", "HEAD"],
+            capture_output=True, text=True, cwd=worktree_path, timeout=10,
+        )
+        if not diff_check.stdout.strip() and impl_elapsed < 5.0:
+            _log_task_event(state, "task_complete", task_id=issue_id, success=False,
+                           duration_ms=round(impl_elapsed * 1000))
+            return ImplementationResult(
+                issue_id=issue_id, success=False,
+                output=f"Agent produced no file changes after {impl_elapsed:.1f}s",
+                cost_usd=impl_cost,
+            )
 
     # Accumulate cost into pipeline state for observability
     state.total_cost_usd += impl_cost
@@ -860,7 +887,8 @@ async def _implement_single_task(
                 f"\n\n⚠️ Targeted test warning:\n{test_output[-1000:]}"
             )
 
-    _log_task_event(state, "task_complete", task_id=issue_id, success=impl_result.success)
+    _log_task_event(state, "task_complete", task_id=issue_id, success=impl_result.success,
+                   duration_ms=round((time.monotonic() - impl_start) * 1000))
 
     # Checkpoint completed task for partial resume
     if impl_result.success:

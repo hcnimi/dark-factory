@@ -40,6 +40,17 @@ TOOLS_REVIEW = ["Read", "Glob", "Grep"]
 TOOLS_NONE: list[str] = []
 
 
+def verify_sdk_available() -> None:
+    """Fail fast at startup if claude-code-sdk is not installed."""
+    try:
+        import claude_code_sdk  # noqa: F401
+    except ImportError:
+        raise ImportError(
+            "claude-code-sdk is required but not installed. "
+            "Run: pip install claude-code-sdk"
+        )
+
+
 # ---------------------------------------------------------------------------
 # can_use_tool callback factory
 # ---------------------------------------------------------------------------
@@ -153,7 +164,10 @@ async def _sdk_query(
     try:
         from claude_code_sdk import ClaudeCodeOptions, ResultMessage, query
     except ImportError:
-        return [f"[sdk-unavailable] prompt: {prompt[:200]}"], 0.0, 0
+        raise ImportError(
+            "claude-code-sdk is required but not installed. "
+            "Run: pip install claude-code-sdk"
+        )
 
     _patch_sdk_parser()
 
@@ -240,8 +254,6 @@ async def _sdk_client_query(
             ResultMessage,
         )
     except ImportError:
-        if dry_run:
-            return [f"[sdk-unavailable] prompt: {prompt[:200]}"], 0.0, 0
         raise ImportError(
             "claude-code-sdk is required but not installed. "
             "Run: pip install claude-code-sdk"
