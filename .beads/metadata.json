@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "dark_factory",
+  "project_id": "7ff3dbcf-8842-466c-8c3a-6b3278c74df3"
+}
