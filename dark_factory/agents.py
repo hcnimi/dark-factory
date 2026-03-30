@@ -34,10 +34,26 @@ TIMEOUT_TEST_GEN = 600
 TIMEOUT_PR_BODY = 120
 TIMEOUT_QUALITY_GATE = 120
 
+# Dynamic timeout parameters for Phase 7
+TIMEOUT_IMPLEMENT_BASE = 120        # base overhead (seconds)
+TIMEOUT_IMPLEMENT_PER_TASK = 300    # per-task budget (seconds)
+COST_CEILING_DEFAULT = 20.0         # default max cost (USD)
+
 # Tool sets by agent role
 TOOLS_IMPLEMENT = ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]
 TOOLS_REVIEW = ["Read", "Glob", "Grep"]
 TOOLS_NONE: list[str] = []
+
+
+def verify_sdk_available() -> None:
+    """Fail fast at startup if claude-code-sdk is not installed."""
+    try:
+        import claude_code_sdk  # noqa: F401
+    except ImportError:
+        raise ImportError(
+            "claude-code-sdk is required but not installed. "
+            "Run: pip install claude-code-sdk"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +169,10 @@ async def _sdk_query(
     try:
         from claude_code_sdk import ClaudeCodeOptions, ResultMessage, query
     except ImportError:
-        return [f"[sdk-unavailable] prompt: {prompt[:200]}"], 0.0, 0
+        raise ImportError(
+            "claude-code-sdk is required but not installed. "
+            "Run: pip install claude-code-sdk"
+        )
 
     _patch_sdk_parser()
 
@@ -240,7 +259,10 @@ async def _sdk_client_query(
             ResultMessage,
         )
     except ImportError:
-        return [f"[sdk-unavailable] prompt: {prompt[:200]}"], 0.0, 0
+        raise ImportError(
+            "claude-code-sdk is required but not installed. "
+            "Run: pip install claude-code-sdk"
+        )
 
     options = ClaudeCodeOptions(
         model=model,
@@ -312,6 +334,7 @@ async def call_implement(
     system_prompt: str | None = None,
     is_off_rails: Any | None = None,
     dry_run: bool = False,
+    timeout_override: float | None = None,
 ) -> tuple[str, float, int]:
     """Phase 7 implementation agent: opus, max_turns=30, edit tools, security.
 
@@ -331,7 +354,7 @@ async def call_implement(
         system_prompt=system_prompt,
         policy=policy,
         is_off_rails=is_off_rails,
-        timeout=TIMEOUT_IMPLEMENT,
+        timeout=timeout_override or TIMEOUT_IMPLEMENT,
     )
     return "\n".join(messages), cost, num_turns
 

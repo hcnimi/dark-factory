@@ -29,6 +29,7 @@ from dark_factory.agents import (
     call_implement,
     call_pr_body,
     call_review,
+    verify_sdk_available,
 )
 from dark_factory.security import SecurityPolicy, default_policy, enforce_security
 
@@ -212,3 +213,20 @@ class TestCallPrBodyDryRun:
         assert "dry-run" in output
         assert cost == 0.0
         assert num_turns == 0
+
+
+class TestVerifySdkAvailable:
+    """Verify startup SDK check."""
+
+    def test_raises_when_sdk_missing(self, monkeypatch):
+        import builtins
+        original_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if name == "claude_code_sdk":
+                raise ImportError("No module named 'claude_code_sdk'")
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", mock_import)
+        with pytest.raises(ImportError, match="claude-code-sdk is required"):
+            verify_sdk_available()

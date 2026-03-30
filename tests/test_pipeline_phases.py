@@ -344,7 +344,7 @@ class TestMultipleMergeConflicts:
         ]
 
         # All 3 implementations succeed
-        async def _success_impl(st, issue, wt, sysprompt, *, dry_run=False):
+        async def _success_impl(st, issue, wt, sysprompt, *, dry_run=False, task_timeout=600):
             return ImplementationResult(
                 issue_id=issue["id"], success=True, output="ok", cost_usd=0.0,
             )
@@ -391,7 +391,7 @@ class TestMultipleMergeConflicts:
             for i in range(1, 4)
         ]
 
-        async def _success_impl(st, issue, wt, sysprompt, *, dry_run=False):
+        async def _success_impl(st, issue, wt, sysprompt, *, dry_run=False, task_timeout=600):
             return ImplementationResult(
                 issue_id=issue["id"], success=True, output="ok", cost_usd=0.0,
             )
@@ -422,7 +422,7 @@ class TestErrorIsolationMocked:
         """One task raising an exception should not prevent others from completing."""
         call_count = 0
 
-        async def _impl_side_effect(st, issue, wt, sysprompt, *, dry_run=False):
+        async def _impl_side_effect(st, issue, wt, sysprompt, *, dry_run=False, task_timeout=600):
             nonlocal call_count
             call_count += 1
             if issue["id"] == "T-1":
@@ -467,7 +467,7 @@ class TestErrorIsolationMocked:
     @patch("dark_factory.pipeline._implement_single_task")
     def test_dependent_task_skipped_when_dependency_fails(self, mock_impl, state):
         """Task depending on a failed task should be skipped."""
-        async def _impl_side_effect(st, issue, wt, sysprompt, *, dry_run=False):
+        async def _impl_side_effect(st, issue, wt, sysprompt, *, dry_run=False, task_timeout=600):
             if issue["id"] == "T-1":
                 raise RuntimeError("Task 1 failed")
             return ImplementationResult(
@@ -509,7 +509,7 @@ class TestErrorIsolationMocked:
     @patch("dark_factory.pipeline._implement_single_task")
     def test_independent_task_unaffected_by_failure_in_same_wave(self, mock_impl, state):
         """An independent task in the same wave as a failing task should still succeed."""
-        async def _impl_side_effect(st, issue, wt, sysprompt, *, dry_run=False):
+        async def _impl_side_effect(st, issue, wt, sysprompt, *, dry_run=False, task_timeout=600):
             if issue["id"] == "T-2":
                 raise RuntimeError("T-2 exploded")
             return ImplementationResult(
@@ -567,7 +567,7 @@ class TestPhase7TDDSectionInjection:
         captured_prompt = None
 
         async def _capture_prompt(
-            prompt, *, worktree_path, system_prompt, is_off_rails, dry_run=False
+            prompt, *, worktree_path, system_prompt, is_off_rails, dry_run=False, timeout_override=None
         ):
             nonlocal captured_prompt
             captured_prompt = prompt
@@ -595,7 +595,7 @@ class TestPhase7TDDSectionInjection:
         captured_prompt = None
 
         async def _capture_prompt(
-            prompt, *, worktree_path, system_prompt, is_off_rails, dry_run=False
+            prompt, *, worktree_path, system_prompt, is_off_rails, dry_run=False, timeout_override=None
         ):
             nonlocal captured_prompt
             captured_prompt = prompt

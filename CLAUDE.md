@@ -32,7 +32,7 @@ dark-factory init
 
 ## Dependencies
 
-No external Python dependencies. Requires `git` and `gh` CLI tools at runtime. Uses Claude Agent SDK for LLM calls (provided by the Claude Code environment).
+Requires `claude-code-sdk` (pip dependency), plus `git` and `gh` CLI tools at runtime.
 
 ## Principles
 

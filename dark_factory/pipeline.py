@@ -6,6 +6,7 @@ about which phase to run next.
 
 from __future__ import annotations
 
+import asyncio
 import json as _json
 import subprocess
 import time
@@ -58,6 +59,8 @@ def _log_phase_event(
     }
     if duration_ms is not None:
         event["duration_ms"] = duration_ms
+    if state.run_id:
+        event["run_id"] = state.run_id
 
     try:
         events_dir = Path(state.repo_root) / ".dark-factory"
@@ -97,6 +100,8 @@ def _log_task_event(
         event["success"] = success
     if duration_ms is not None:
         event["duration_ms"] = duration_ms
+    if state.run_id:
+        event["run_id"] = state.run_id
 
     try:
         events_dir = Path(state.repo_root) / ".dark-factory"
@@ -411,7 +416,11 @@ async def run_phase_6_5(
     holdout_content = _extract_section(output, "HOLDOUT_TESTS_START", "HOLDOUT_TESTS_END")
 
     if not visible_content and not holdout_content:
-        return result
+        raise PipelineError(
+            6.5,
+            "Test generation produced no test content from non-empty spec. "
+            f"Agent output (first 500 chars): {output[:500]}"
+        )
 
     # Single-scenario guard: when spec has only 1 scenario, all tests
     # must be visible (no holdout split possible). Merge any holdout
@@ -435,11 +444,19 @@ async def run_phase_6_5(
     if visible_content:
         visible_path = test_dir_path / f"visible_tests_{source_id}.py"
         visible_path.write_text(visible_content)
+        if not visible_path.exists() or visible_path.stat().st_size == 0:
+            raise PipelineError(
+                6.5, f"Failed to write visible test file: {visible_path}"
+            )
         result.visible_test_paths.append(str(visible_path))
 
     if holdout_content:
         holdout_path = test_dir_path / f"holdout_tests_{source_id}.py"
         holdout_path.write_text(holdout_content)
+        if not holdout_path.exists() or holdout_path.stat().st_size == 0:
+            raise PipelineError(
+                6.5, f"Failed to write holdout test file: {holdout_path}"
+            )
         result.holdout_test_paths.append(str(holdout_path))
 
     # Persist to state
@@ -779,6 +796,7 @@ async def _implement_single_task(
     system_prompt: str | None,
     *,
     dry_run: bool = False,
+    task_timeout: float = 600,
 ) -> ImplementationResult:
     """Implement a single issue -- extracted from the Phase 7 loop."""
     from .agents import call_implement
@@ -816,13 +834,60 @@ async def _implement_single_task(
                 tdd_section += f"### {p.name}\n```\n{p.read_text()}\n```\n\n"
         prompt += tdd_section
 
-    impl_output, impl_cost, _num_turns = await call_implement(
-        prompt,
-        worktree_path=worktree_path,
-        system_prompt=system_prompt,
-        is_off_rails=_is_off_rails,
-        dry_run=dry_run,
-    )
+    task_start = time.monotonic()
+    try:
+        impl_output, impl_cost, _num_turns = await asyncio.wait_for(
+            call_implement(
+                prompt,
+                worktree_path=worktree_path,
+                system_prompt=system_prompt,
+                is_off_rails=_is_off_rails,
+                dry_run=dry_run,
+                timeout_override=task_timeout,
+            ),
+            timeout=task_timeout + 30,  # grace period over SDK timeout
+        )
+    except asyncio.TimeoutError:
+        elapsed = time.monotonic() - task_start
+        _log_task_event(state, "task_complete", task_id=issue_id, success=False,
+                       duration_ms=round(elapsed * 1000))
+        return ImplementationResult(
+            issue_id=issue_id,
+            success=False,
+            output=f"Task timed out after {elapsed:.0f}s (limit: {task_timeout}s)",
+            cost_usd=0.0,
+        )
+
+    impl_elapsed = time.monotonic() - task_start
+
+    # Validate: fail if agent returned instantly with no meaningful output
+    if impl_elapsed < 1.0 and not impl_output.strip():
+        _log_task_event(state, "task_complete", task_id=issue_id, success=False,
+                       duration_ms=round(impl_elapsed * 1000))
+        return ImplementationResult(
+            issue_id=issue_id, success=False,
+            output="Agent returned in <1s with no output (ghost completion)",
+            cost_usd=impl_cost,
+        )
+
+    # Validate: check for actual file changes
+    if not dry_run:
+        diff_check = subprocess.run(
+            ["git", "diff", "--stat", "HEAD"],
+            capture_output=True, text=True, cwd=worktree_path, timeout=10,
+        )
+        if not diff_check.stdout.strip() and impl_elapsed < 5.0:
+            _log_task_event(state, "task_complete", task_id=issue_id, success=False,
+                           duration_ms=round(impl_elapsed * 1000))
+            return ImplementationResult(
+                issue_id=issue_id, success=False,
+                output=f"Agent produced no file changes after {impl_elapsed:.1f}s",
+                cost_usd=impl_cost,
+            )
+
+    # Emit progress event
+    _log_task_event(state, "task_progress", task_id=issue_id,
+                   duration_ms=round(impl_elapsed * 1000))
 
     # Accumulate cost into pipeline state for observability
     state.total_cost_usd += impl_cost
@@ -860,7 +925,8 @@ async def _implement_single_task(
                 f"\n\n⚠️ Targeted test warning:\n{test_output[-1000:]}"
             )
 
-    _log_task_event(state, "task_complete", task_id=issue_id, success=impl_result.success)
+    _log_task_event(state, "task_complete", task_id=issue_id, success=impl_result.success,
+                   duration_ms=round((time.monotonic() - task_start) * 1000))
 
     # Checkpoint completed task for partial resume
     if impl_result.success:
@@ -877,6 +943,7 @@ async def _run_wave(
     system_prompt: str | None,
     *,
     dry_run: bool = False,
+    task_timeout: float = 600,
 ) -> tuple[list[ImplementationResult], list[MergeConflict]]:
     """Execute a wave of tasks, respecting max_parallel.
 
@@ -891,7 +958,8 @@ async def _run_wave(
 
     if len(wave_issues) == 1:
         result = await _implement_single_task(
-            state, wave_issues[0], main_worktree, system_prompt, dry_run=dry_run,
+            state, wave_issues[0], main_worktree, system_prompt,
+            dry_run=dry_run, task_timeout=task_timeout,
         )
         return [result], []
 
@@ -915,7 +983,8 @@ async def _run_wave(
         # Run all tasks in the batch concurrently
         coros = [
             _implement_single_task(
-                state, issue, wt_path, system_prompt, dry_run=dry_run,
+                state, issue, wt_path, system_prompt,
+                dry_run=dry_run, task_timeout=task_timeout,
             )
             for issue, wt_path, _branch in worktrees
         ]
@@ -971,6 +1040,18 @@ def _has_dependency_markers(issues: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _validate_task_completion(issue_id: str, worktree_path: str) -> bool:
+    """Check if a completed task has a corresponding git checkpoint commit."""
+    try:
+        result = subprocess.run(
+            ["git", "log", "--oneline", "--all", "--grep", issue_id],
+            capture_output=True, text=True, cwd=worktree_path, timeout=10,
+        )
+        return bool(result.stdout.strip())
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+
 async def run_phase_7(
     state: PipelineState,
     issues: list[dict[str, Any]],
@@ -989,6 +1070,15 @@ async def run_phase_7(
     # Filter out epics
     task_issues = [i for i in issues if i.get("type", "task") != "epic"]
 
+    from .agents import TIMEOUT_IMPLEMENT, TIMEOUT_IMPLEMENT_PER_TASK, COST_CEILING_DEFAULT
+
+    task_count = len(task_issues)
+    per_task_timeout = state.task_timeout or min(TIMEOUT_IMPLEMENT, TIMEOUT_IMPLEMENT_PER_TASK)
+
+    # Apply cost ceiling if no explicit budget set
+    if state.max_cost_usd is None:
+        state.max_cost_usd = COST_CEILING_DEFAULT
+
     if not task_issues:
         return result
 
@@ -999,12 +1089,24 @@ async def run_phase_7(
     if not _has_dependency_markers(task_issues):
         # Sequential fallback -- preserve existing behavior
         for issue in task_issues:
-            if issue.get("id") in completed:
-                _log_task_event(state, "task_skipped", task_id=issue.get("id", ""),
-                               task_title=issue.get("title", ""))
-                continue
+            issue_id = issue.get("id", "unknown")
+            if issue_id in completed:
+                # Validate: check git checkpoint exists
+                if not dry_run and not _validate_task_completion(issue_id, worktree_path):
+                    # Ghost completion — remove and re-implement
+                    state.phase7_completed_tasks = [
+                        t for t in state.phase7_completed_tasks if t != issue_id
+                    ]
+                    completed.discard(issue_id)
+                    _log_task_event(state, "task_invalidated", task_id=issue_id,
+                                   task_title=issue.get("title", ""))
+                else:
+                    _log_task_event(state, "task_skipped", task_id=issue_id,
+                                   task_title=issue.get("title", ""))
+                    continue
             impl_result = await _implement_single_task(
-                state, issue, worktree_path, system_prompt, dry_run=dry_run,
+                state, issue, worktree_path, system_prompt,
+                dry_run=dry_run, task_timeout=per_task_timeout,
             )
             result.results.append(impl_result)
             result.total_cost_usd += impl_result.cost_usd
@@ -1039,9 +1141,17 @@ async def run_phase_7(
         for idx in wave:
             issue = index_to_issue[idx]
             if issue.get("id") in completed:
-                _log_task_event(state, "task_skipped", task_id=issue.get("id", ""),
-                               task_title=issue.get("title", ""))
-                continue
+                if not dry_run and not _validate_task_completion(issue.get("id", ""), worktree_path):
+                    state.phase7_completed_tasks = [
+                        t for t in state.phase7_completed_tasks if t != issue.get("id")
+                    ]
+                    completed.discard(issue.get("id"))
+                    _log_task_event(state, "task_invalidated", task_id=issue.get("id", ""),
+                                   task_title=issue.get("title", ""))
+                else:
+                    _log_task_event(state, "task_skipped", task_id=issue.get("id", ""),
+                                   task_title=issue.get("title", ""))
+                    continue
             task_deps = dag._edges.get(idx, set())
             failed_deps = task_deps & failed_indices
             if failed_deps:
@@ -1074,7 +1184,8 @@ async def run_phase_7(
         _log_task_event(state, "wave_start", wave=wave_idx + 1)
 
         wave_results, wave_conflicts = await _run_wave(
-            state, wave_issues, worktree_path, system_prompt, dry_run=dry_run,
+            state, wave_issues, worktree_path, system_prompt,
+            dry_run=dry_run, task_timeout=per_task_timeout,
         )
 
         _log_task_event(state, "wave_complete", wave=wave_idx + 1)

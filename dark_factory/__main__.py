@@ -226,6 +226,56 @@ def _read_safe(path: Path) -> str:
         return ""
 
 
+def _validate_phase_artifacts(state: PipelineState, phase: float) -> bool:
+    """Verify that a 'completed' phase actually produced expected artifacts.
+
+    Returns False for ghost completions (0ms duration, no artifacts).
+    """
+    # Ghost completion detection: phases that completed impossibly fast
+    timing = state.phase_timings.get(str(phase), 0)
+    if timing < 0.1 and phase in (6.5, 6.75, 7, 8, 9):
+        return False
+
+    if phase == 6.5:
+        return bool(state.visible_test_paths or state.holdout_test_paths)
+    elif phase == 6.75:
+        return bool(state.sprint_contracts)
+    elif phase == 7:
+        return bool(state.phase7_completed_tasks)
+    elif phase == 8:
+        return timing > 0.1
+    elif phase == 9:
+        return timing > 0.1
+    return True  # other phases don't need artifact validation
+
+
+def _should_run_phase(state: PipelineState, phase: float) -> bool:
+    """Check if a phase should run, accounting for ghost completions.
+
+    Returns True if the phase is not completed, or if it was completed
+    but has missing artifacts (auto-invalidates ghost completions).
+    """
+    if not state.is_phase_completed(phase):
+        return True
+
+    if not _validate_phase_artifacts(state, phase):
+        import sys
+        phase_name = {
+            6.5: "Test Generation", 6.75: "Sprint Contracts",
+            7: "Implementation", 8: "Test & Dep Audit",
+            9: "Implementation Review",
+        }.get(phase, f"Phase {phase}")
+        print(
+            f"\u26a0\ufe0f  Re-running {phase_name} (Phase {phase}): "
+            f"previous completion produced no artifacts",
+            file=sys.stderr,
+        )
+        state.completed_phases.remove(phase)
+        return True
+
+    return False
+
+
 def _run_full_pipeline(argv: list[str]) -> None:
     """Execute the full Dark Factory pipeline end-to-end.
 
@@ -258,6 +308,8 @@ def _run_full_pipeline(argv: list[str]) -> None:
     ticket: TicketFields | None = None
     exploration_output: str = ""
     plan_review_verdict: str = "PASS"
+    session_lock = None  # assigned after lock acquisition; released in finally
+    from .lock import acquire_lock, release_lock
 
     try:
         # ── Phase 0: Arg parsing, tool checks, state init ──────────────
@@ -286,8 +338,29 @@ def _run_full_pipeline(argv: list[str]) -> None:
                 state.error = None  # clear previous error for retry
 
         state.pipeline_status = "running"
+
+        if not state.dry_run:
+            from .agents import verify_sdk_available
+            try:
+                verify_sdk_available()
+            except ImportError as exc:
+                summary.error_phase = 0
+                summary.error_message = str(exc)
+                print(summary.render(), file=sys.stderr)
+                sys.exit(1)
+
+        if args.task_timeout is not None:
+            state.task_timeout = args.task_timeout
         summary.add_phase(0, PHASE_NAMES[0],
                           duration_s=time.monotonic() - phase_start)
+
+        # Session locking — prevent concurrent runs on the same session
+        import uuid
+
+        run_id = str(uuid.uuid4())
+        state.run_id = run_id
+        state_dir = Path(state.repo_root) / ".dark-factory"
+        session_lock = acquire_lock(state_dir, state.source.id, run_id)
 
         source_id_lower = args.source.id
         external_ref = f"{args.source.kind}:{args.source.raw}"
@@ -503,7 +576,7 @@ def _run_full_pipeline(argv: list[str]) -> None:
                               duration_s=time.monotonic() - phase_start)
 
         # ── Phase 6.5: Test Generation ─────────────────────────────────
-        if not state.is_phase_completed(6.5):
+        if _should_run_phase(state, 6.5):
             spec_texts = [spec_text] if spec_text else []
             phase_start = time.monotonic()
             tdd_result = asyncio.run(run_phase(
@@ -516,7 +589,7 @@ def _run_full_pipeline(argv: list[str]) -> None:
                               cost_usd=tdd_result.cost_usd)
 
         # ── Phase 6.75: Sprint Contracts ─────────────────────────────
-        if not state.is_phase_completed(6.75):
+        if _should_run_phase(state, 6.75):
             from .pipeline import run_phase_6_75
             phase_start = time.monotonic()
             contracts_result = asyncio.run(run_phase(
@@ -556,7 +629,7 @@ def _run_full_pipeline(argv: list[str]) -> None:
                 pass  # draft PR is nice-to-have, don't fail pipeline
 
         # ── Phase 7: Implementation ────────────────────────────────────
-        if not state.is_phase_completed(7):
+        if _should_run_phase(state, 7):
             claude_md = Path(state.worktree_path) / "CLAUDE.md"
             sys_prompt = _read_safe(claude_md) or None
             phase_start = time.monotonic()
@@ -570,7 +643,7 @@ def _run_full_pipeline(argv: list[str]) -> None:
                               cost_usd=impl_result.total_cost_usd)
 
         # ── Phase 8: Test & Dep Audit ──────────────────────────────────
-        if not state.is_phase_completed(8):
+        if _should_run_phase(state, 8):
             claude_md = Path(state.worktree_path) / "CLAUDE.md"
             claude_md_text = _read_safe(claude_md)
             phase_start = time.monotonic()
@@ -615,7 +688,7 @@ def _run_full_pipeline(argv: list[str]) -> None:
             print(f"WARNING: {diff_report.warning}", file=sys.stderr)
 
         # ── Phase 9: Implementation Review ─────────────────────────────
-        if not state.is_phase_completed(9):
+        if _should_run_phase(state, 9):
             phase_start = time.monotonic()
             review_result = asyncio.run(run_phase(
                 state, 9, run_phase_9,
@@ -748,6 +821,9 @@ def _run_full_pipeline(argv: list[str]) -> None:
         summary.total_duration_s = time.monotonic() - pipeline_start
         print(summary.render(), file=sys.stderr)
         sys.exit(1)
+    finally:
+        if session_lock is not None:
+            release_lock(session_lock)
 
 
 if __name__ == "__main__":

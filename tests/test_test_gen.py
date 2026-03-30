@@ -10,6 +10,7 @@ from dark_factory.agents import (
     MAX_TURNS_TEST_GEN,
     MODEL_SONNET,
     TOOLS_REVIEW,
+    _sdk_query,
     call_test_gen,
 )
 from dark_factory.pipeline import (
@@ -58,6 +59,25 @@ class TestCallTestGenDryRun:
             call_test_gen("any prompt", worktree_path="/tmp", dry_run=True)
         )
         assert cost == 0.0
+
+
+class TestSdkQueryRaisesOnMissingSDK:
+    """Verify _sdk_query raises ImportError when SDK is unavailable."""
+
+    def test_sdk_query_raises_import_error(self, monkeypatch):
+        import builtins
+        original_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if name == "claude_code_sdk":
+                raise ImportError("No module named 'claude_code_sdk'")
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", mock_import)
+        with pytest.raises(ImportError, match="claude-code-sdk is required"):
+            asyncio.run(
+                _sdk_query("test", model="sonnet", max_turns=1, allowed_tools=[])
+            )
 
 
 class TestCallTestGenSdkUnavailable:
@@ -265,3 +285,65 @@ class TestRunPhase6_5DryRun:
         )
         assert state.visible_test_paths == []
         assert state.holdout_test_paths == []
+
+
+class TestRunPhase6_5FailsOnEmptyOutput:
+    """Phase 6.5 should fail when agent produces no test content from non-empty specs."""
+
+    def test_raises_on_empty_agent_output(self, state, tmp_path, monkeypatch):
+        """Agent returns output without section markers -> PipelineError."""
+        async def _fake_test_gen(prompt, **kwargs):
+            return "I could not generate any tests.", 0.05, 1
+
+        monkeypatch.setattr("dark_factory.agents.call_test_gen", _fake_test_gen)
+
+        from dark_factory.state import PipelineError
+        with pytest.raises(PipelineError, match="no test content"):
+            asyncio.run(
+                run_phase_6_5(
+                    state, str(tmp_path),
+                    spec_texts=["Given a user exists\nWhen they log in\nThen they see dashboard"],
+                    dry_run=False,
+                )
+            )
+
+    def test_raises_on_output_without_markers(self, state, tmp_path, monkeypatch):
+        """Agent returns text but no VISIBLE_TESTS_START/END markers -> PipelineError."""
+        async def _fake_test_gen(prompt, **kwargs):
+            return "Here are some tests:\ndef test_login():\n    assert True", 0.05, 1
+
+        monkeypatch.setattr("dark_factory.agents.call_test_gen", _fake_test_gen)
+
+        from dark_factory.state import PipelineError
+        with pytest.raises(PipelineError, match="no test content"):
+            asyncio.run(
+                run_phase_6_5(
+                    state, str(tmp_path),
+                    spec_texts=["Given a user exists"],
+                    dry_run=False,
+                )
+            )
+
+    def test_succeeds_with_proper_markers(self, state, tmp_path, monkeypatch):
+        """Agent returns properly marked output -> success with test files."""
+        async def _fake_test_gen(prompt, **kwargs):
+            return (
+                "### VISIBLE_TESTS_START\n"
+                "def test_login():\n"
+                "    assert True\n"
+                "### VISIBLE_TESTS_END\n"
+            ), 0.10, 1
+
+        monkeypatch.setattr("dark_factory.agents.call_test_gen", _fake_test_gen)
+
+        result = asyncio.run(
+            run_phase_6_5(
+                state, str(tmp_path),
+                spec_texts=["Given a user exists"],
+                dry_run=False,
+            )
+        )
+        assert len(result.visible_test_paths) == 1
+        # Verify file exists on disk
+        from pathlib import Path
+        assert Path(result.visible_test_paths[0]).exists()
