@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dark-factory"
-version = "0.1.0"
-description = "Deterministic Python pipeline for autonomous spec-to-PR orchestration"
+version = "2.0.0"
+description = "Three-component autonomous spec-to-PR orchestration"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 requires-python = ">=3.11"

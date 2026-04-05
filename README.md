@@ -76,6 +76,9 @@ Direct CLI:
 
 ```bash
 python3 -m dark_factory run <source> [--dry-run] [--resume]
+
+# Check pipeline status
+dark-factory status <source-id>
 ```
 
 ## Phase Pipeline
@@ -91,11 +94,11 @@ The pipeline executes 12 phases in sequence. Deterministic phases consume zero L
 | 3 | Scaffold & OpenSpec | SDK (Opus) | Branch/worktree creation, dependency install, spec generation |
 | 4 | Plan Review Gate | SDK (Sonnet) | Review plan for completeness and feasibility |
 | 5 | Human Checkpoint | Deterministic | Render plan summary, capture approve/modify/abort decision |
-| 6 | Issue Creation | Deterministic | Create beads issues from tasks, parse dependency DAG |
+| 6 | Issue Creation | Deterministic | Create issues from tasks, parse dependency DAG |
 | 6.5 | Test Generation | SDK (Sonnet) | Generate visible (TDD) + holdout (validation) test sets |
 | 7 | Implementation | SDK (Opus) | Implement issues — sequential or parallel waves |
 | 8 | Verification | SDK (Opus) | Run tests, dependency audit, holdout test execution |
-| 9 | Review | SDK (Sonnet/Opus) | Diff review + fix cycle (max 1 cycle) |
+| 9 | Review | SDK (Sonnet/Opus) | Iterative review-fix cycles (up to 3, with diminishing-returns exit) |
 | 10 | Dev Verification | Deterministic | Detect dev server, render verification checklist |
 | 11 | PR Creation | SDK (Sonnet) | Push branch, generate PR body, create PR via `gh` |
 
@@ -122,6 +125,7 @@ dark_factory/
 ├── pr.py                # Phase 11: push, PR body generation, PR creation
 ├── agents.py            # SDK call wrappers with model/tool/turn configuration
 ├── security.py          # SecurityPolicy enforcement on every tool invocation
+├── status.py            # `dark-factory status` — pipeline state reporting
 └── worktree.py          # Parallel worktree creation and cleanup
 ```
 
@@ -135,7 +139,7 @@ Input (Jira/file/inline)
         → ContextBundle (repo structure, imports, symbols, test mapping)
           → OpenSpec scaffold (design, specs, tasks)
             → Human checkpoint (approve/modify/abort)
-              → Beads issues + TaskDAG (dependency waves)
+              → Issues + TaskDAG (dependency waves)
                 → Test generation (visible + holdout split)
                   → Implementation (parallel waves of SDK agents)
                     → Verification (tests, audit, review)
@@ -151,7 +155,7 @@ Input (Jira/file/inline)
 | Review | Sonnet | 10 | Read, Glob, Grep (read-only) | Phase 9 |
 | PR Body | Sonnet | 3 | None | Phase 11 |
 | Quality Gate | Sonnet | 3 | None | Phase 1.5 |
-| Test Gen | Sonnet | 10 | Read tools | Phase 6.5 |
+| Test Gen | Sonnet | 3 | Read tools | Phase 6.5 |
 
 ## Key Features
 
@@ -198,7 +202,7 @@ Pipeline state persists to `.dark-factory/<source_id>.json`. Use `--resume` to c
 ### Feedback Loops
 
 - **Lint-in-loop**: implementing agents run linting after each file change
-- **Self-review checklist**: structured self-check at end of implementation (diff stat, debug artifacts, test coverage)
+- **Iterative review cycles**: Phase 9 evaluator-optimizer loop with up to 3 review-fix cycles and diminishing-returns detection
 - **Targeted tests between tasks**: run relevant tests after each issue, not just at the end
 
 ### Diff-Size Guard
@@ -219,16 +223,16 @@ echo '<json>' | python3 -m dark_factory 10 # Phase 10: verification checklist
 ## Rules
 
 - Never skip the human checkpoint (Phase 5)
-- One sub-agent per beads issue in Phase 7
+- One sub-agent per issue in Phase 7
 - Max 2 test-fix retries in Phase 8
-- Max 1 review-fix cycle in Phase 9
+- Max 3 iterative review-fix cycles in Phase 9 (with diminishing-returns early exit)
 - Off-rails detection interrupts stuck agents (repeated messages or >100 turns)
 - Completion summary prints per-phase timing, cost, and turns
 
 ## Dependencies
 
 - **Required tools**: `git`, `gh`
-- **Optional tools**: `jira` (for Jira input), `bd` (beads issue tracking), `npm`/`pytest`/`make`/`cargo`/`go` (detected per project)
+- **Optional tools**: `jira` (for Jira input), `npm`/`pytest`/`make`/`cargo`/`go` (detected per project)
 - **Python**: Claude Agent SDK for LLM calls
 
 ## Related
