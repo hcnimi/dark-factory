@@ -1,177 +1,81 @@
-"""Tests for dark_factory.state: PipelineState serialization round-trip."""
-
-from __future__ import annotations
+"""Tests for dark_factory.state (event logging)."""
 
 import json
 from pathlib import Path
 
-import pytest
-
-from dark_factory.state import PipelineError, PipelineState, SourceInfo
-
-
-@pytest.fixture
-def source():
-    return SourceInfo(kind="jira", raw="SDLC-123", id="sdlc-123")
-
-
-@pytest.fixture
-def state(source, tmp_path):
-    return PipelineState(source=source, repo_root=str(tmp_path))
+from dark_factory.state import log_event, load_events
+from dark_factory.types import (
+    RunState,
+    RunConfig,
+    RunStatus,
+    SourceInfo,
+    SourceKind,
+)
 
 
-class TestSourceInfo:
-    def test_fields(self):
-        s = SourceInfo(kind="file", raw="specs/feature.md", id="feature")
-        assert s.kind == "file"
-        assert s.raw == "specs/feature.md"
-        assert s.id == "feature"
+def _make_state(tmp_path):
+    source = SourceInfo(SourceKind.INLINE, "test feature", "test-feature")
+    state = RunState.create(source=source, config=RunConfig())
+    # Ensure .dark-factory dir exists
+    state.state_dir(str(tmp_path))
+    return state
 
 
-class TestPipelineStateSerialization:
-    def test_save_creates_file(self, state, tmp_path):
-        path = state.save()
-        assert path.exists()
-        assert path == tmp_path / ".dark-factory" / "sdlc-123.json"
+class TestLogEvent:
+    def test_creates_event_file(self, tmp_path):
+        state = _make_state(tmp_path)
+        log_event(state, str(tmp_path), "test_event", {"key": "value"})
 
-    def test_save_creates_directory(self, state, tmp_path):
-        state.save()
-        assert (tmp_path / ".dark-factory").is_dir()
+        events_path = state.events_path(str(tmp_path))
+        assert events_path.exists()
 
-    def test_round_trip(self, state, tmp_path):
-        state.current_phase = 3
-        state.completed_phases = [0, 1, 2]
-        state.phase_timings = {"0": 0.5, "1": 1.2, "2": 0.8}
-        state.total_cost_usd = 0.42
-        state.branch = "feat/sdlc-123"
-        state.worktree_path = "/tmp/wt"
-        state.epic_id = "EPIC-1"
-        state.issues = [{"id": "SDLC-124", "title": "subtask"}]
+    def test_event_has_required_fields(self, tmp_path):
+        state = _make_state(tmp_path)
+        log_event(state, str(tmp_path), "test_event", {"key": "value"})
 
-        path = state.save()
-        loaded = PipelineState.load(path)
+        events = load_events(state.events_path(str(tmp_path)))
+        assert len(events) == 1
 
-        assert loaded.source.kind == "jira"
-        assert loaded.source.id == "sdlc-123"
-        assert loaded.current_phase == 3
-        assert loaded.completed_phases == [0, 1, 2]
-        assert loaded.phase_timings == {"0": 0.5, "1": 1.2, "2": 0.8}
-        assert loaded.total_cost_usd == 0.42
-        assert loaded.branch == "feat/sdlc-123"
-        assert loaded.worktree_path == "/tmp/wt"
-        assert loaded.epic_id == "EPIC-1"
-        assert loaded.issues == [{"id": "SDLC-124", "title": "subtask"}]
+        event = events[0]
+        assert event["type"] == "test_event"
+        assert event["run_id"] == state.run_id
+        assert "ts" in event
+        assert event["key"] == "value"
 
-    def test_save_is_valid_json(self, state, tmp_path):
-        state.save()
-        path = tmp_path / ".dark-factory" / "sdlc-123.json"
-        data = json.loads(path.read_text())
-        assert data["source"]["kind"] == "jira"
+    def test_appends_multiple_events(self, tmp_path):
+        state = _make_state(tmp_path)
+        log_event(state, str(tmp_path), "event_1", {})
+        log_event(state, str(tmp_path), "event_2", {})
+        log_event(state, str(tmp_path), "event_3", {})
 
-    def test_overwrite_on_second_save(self, state, tmp_path):
-        state.save()
-        state.current_phase = 5
-        state.save()
-        loaded = PipelineState.load(state._state_path())
-        assert loaded.current_phase == 5
+        events = load_events(state.events_path(str(tmp_path)))
+        assert len(events) == 3
+        assert [e["type"] for e in events] == ["event_1", "event_2", "event_3"]
 
-    def test_dry_run_preserved(self, source, tmp_path):
-        state = PipelineState(source=source, repo_root=str(tmp_path), dry_run=True)
-        path = state.save()
-        loaded = PipelineState.load(path)
-        assert loaded.dry_run is True
+    def test_includes_status_and_cost(self, tmp_path):
+        state = _make_state(tmp_path)
+        state.status = RunStatus.IMPLEMENTING
+        state.cost_usd = 1.23
+        log_event(state, str(tmp_path), "test", {})
 
-    def test_error_preserved(self, state, tmp_path):
-        state.error = "Phase 2 failed: timeout"
-        path = state.save()
-        loaded = PipelineState.load(path)
-        assert loaded.error == "Phase 2 failed: timeout"
+        events = load_events(state.events_path(str(tmp_path)))
+        assert events[0]["status"] == "implementing"
+        assert events[0]["cost_usd"] == 1.23
 
 
-class TestPipelineStateHelpers:
-    def test_is_phase_completed(self, state):
-        state.completed_phases = [0, 1, 2]
-        assert state.is_phase_completed(1) is True
-        assert state.is_phase_completed(5) is False
+class TestLoadEvents:
+    def test_empty_when_no_file(self, tmp_path):
+        events = load_events(tmp_path / "nonexistent.jsonl")
+        assert events == []
 
-    def test_next_phase(self, state):
-        state.current_phase = 3
-        assert state.next_phase() == 3
+    def test_loads_valid_jsonl(self, tmp_path):
+        path = tmp_path / "events.jsonl"
+        lines = [
+            json.dumps({"type": "a", "ts": "t1"}),
+            json.dumps({"type": "b", "ts": "t2"}),
+        ]
+        path.write_text("\n".join(lines) + "\n")
 
-
-class TestProgressReporting:
-    """Tests for pipeline_status, updated_at, and phase7_progress fields."""
-
-    def test_save_sets_updated_at(self, state):
-        assert state.updated_at == ""
-        state.save()
-        assert state.updated_at != ""
-        # Should be a valid ISO 8601 timestamp
-        from datetime import datetime
-        datetime.fromisoformat(state.updated_at)
-
-    def test_default_pipeline_status(self, state):
-        assert state.pipeline_status == "pending"
-
-    def test_pipeline_status_roundtrip(self, state):
-        state.pipeline_status = "running"
-        path = state.save()
-        loaded = PipelineState.load(path)
-        assert loaded.pipeline_status == "running"
-
-    def test_phase7_progress_roundtrip(self, state):
-        state.phase7_progress = {
-            "wave": 2,
-            "total_waves": 4,
-            "tasks_completed": 5,
-            "tasks_total": 12,
-            "wave_task_ids": ["issue-1", "issue-2"],
-        }
-        path = state.save()
-        loaded = PipelineState.load(path)
-        assert loaded.phase7_progress["wave"] == 2
-        assert loaded.phase7_progress["tasks_total"] == 12
-
-    def test_phase7_progress_null_by_default(self, state):
-        path = state.save()
-        loaded = PipelineState.load(path)
-        assert loaded.phase7_progress is None
-
-    def test_load_ignores_unknown_fields(self, state, tmp_path):
-        """Old state files with extra keys (from a newer version) load fine."""
-        state.save()
-        path = state._state_path()
-        data = json.loads(path.read_text())
-        data["some_future_field"] = "value"
-        path.write_text(json.dumps(data))
-        loaded = PipelineState.load(path)
-        assert loaded.source.id == "sdlc-123"
-
-    def test_load_uses_defaults_for_missing_fields(self, state, tmp_path):
-        """Old state files without new fields load with defaults."""
-        state.save()
-        path = state._state_path()
-        data = json.loads(path.read_text())
-        del data["pipeline_status"]
-        del data["updated_at"]
-        del data["phase7_progress"]
-        path.write_text(json.dumps(data))
-        loaded = PipelineState.load(path)
-        assert loaded.pipeline_status == "pending"
-        assert loaded.updated_at == ""
-        assert loaded.phase7_progress is None
-
-    def test_updated_at_changes_on_each_save(self, state):
-        state.save()
-        first = state.updated_at
-        state.save()
-        second = state.updated_at
-        assert second >= first
-
-
-class TestPipelineError:
-    def test_message_includes_phase(self):
-        err = PipelineError(phase=7, message="implementation failed")
-        assert "Phase 7" in str(err)
-        assert "implementation failed" in str(err)
-        assert err.phase == 7
+        events = load_events(path)
+        assert len(events) == 2
+        assert events[0]["type"] == "a"
