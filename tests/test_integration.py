@@ -151,7 +151,9 @@ class TestRunPipeline:
         mock_implement = AsyncMock()
         mock_evaluate = AsyncMock()
 
-        with patch("builtins.input", return_value="abort"):
+        with patch("sys.stdin") as mock_stdin, \
+             patch("builtins.input", return_value="abort"):
+            mock_stdin.isatty.return_value = True
             with pytest.raises(DarkFactoryError, match="aborted by user"):
                 await _run_pipeline(
                     state, str(tmp_path),
@@ -170,7 +172,9 @@ class TestRunPipeline:
         mock_implement = AsyncMock(return_value="diff")
         mock_evaluate = AsyncMock(return_value=_make_report())
 
-        with patch("builtins.input", return_value="quit"):
+        with patch("sys.stdin") as mock_stdin, \
+             patch("builtins.input", return_value="quit"):
+            mock_stdin.isatty.return_value = True
             with pytest.raises(DarkFactoryError, match="aborted by user"):
                 await _run_pipeline(
                     state, str(tmp_path),
