@@ -56,12 +56,35 @@ def cmd_init(args: argparse.Namespace) -> None:
     if not gitignore.exists():
         gitignore.write_text("# dark-factory run artifacts\n*.json\n*.jsonl\n")
 
+    # Install/update the Claude Code slash command
+    _install_command()
+
     test_cmd = detect_test_command(repo_root)
     claude_md = Path(repo_root) / "CLAUDE.md"
 
     print(f"Initialized .dark-factory/ in {repo_root}")
     print(f"  Test command: {test_cmd or '(not detected)'}")
     print(f"  CLAUDE.md: {'present' if claude_md.exists() else 'missing (recommended)'}")
+
+
+def _install_command() -> None:
+    """Install the /dark-factory slash command to ~/.claude/commands/."""
+    template = Path(__file__).parent / "commands" / "dark-factory.md"
+    if not template.exists():
+        return
+
+    dest_dir = Path.home() / ".claude" / "commands"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / "dark-factory.md"
+
+    template_content = template.read_text()
+    if dest.exists() and dest.read_text() == template_content:
+        print("  /dark-factory command: up to date")
+        return
+
+    action = "updated" if dest.exists() else "installed"
+    dest.write_text(template_content)
+    print(f"  /dark-factory command: {action} -> {dest}")
 
 
 def cmd_run(args: argparse.Namespace) -> None:
