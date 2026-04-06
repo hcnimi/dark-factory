@@ -9,11 +9,19 @@ from dark_factory.infra import (
     run_tests,
     create_worktree,
     remove_worktree,
+    setup_workspace,
+    _active_worktrees,
     _cleanup_worktree_only,
     _build_implementation_prompt,
     _create_no_hooks_settings,
 )
-from dark_factory.types import IntentDocument
+from dark_factory.types import (
+    IntentDocument,
+    RunConfig,
+    RunState,
+    SourceInfo,
+    SourceKind,
+)
 
 
 class TestDetectTestCommand:
@@ -120,6 +128,82 @@ class TestCleanupWorktreeOnly:
             capture_output=True, text=True, cwd=git_repo,
         )
         assert branch in result.stdout
+
+
+class TestCreateWorktreeCleanup:
+    @pytest.fixture
+    def git_repo(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, capture_output=True)
+        (repo / "README.md").write_text("# Test")
+        subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True)
+        return repo
+
+    def test_register_cleanup_false_skips_registration(self, git_repo):
+        """register_cleanup=False should not add to _active_worktrees."""
+        before_count = len(_active_worktrees)
+        worktree_path, branch = create_worktree(str(git_repo), "no-cleanup", register_cleanup=False)
+        assert len(_active_worktrees) == before_count
+        # Clean up manually
+        remove_worktree(worktree_path, branch, str(git_repo))
+
+    def test_register_cleanup_true_adds_to_list(self, git_repo):
+        """Default register_cleanup=True should add to _active_worktrees."""
+        before_count = len(_active_worktrees)
+        worktree_path, branch = create_worktree(str(git_repo), "yes-cleanup")
+        assert len(_active_worktrees) == before_count + 1
+        # Clean up
+        _active_worktrees.pop()
+        remove_worktree(worktree_path, branch, str(git_repo))
+
+
+class TestSetupWorkspace:
+    @pytest.fixture
+    def git_repo(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, capture_output=True)
+        (repo / "README.md").write_text("# Test")
+        subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True)
+        return repo
+
+    def _make_state(self, repo_root, in_place=False):
+        source = SourceInfo(SourceKind.INLINE, "test", "test")
+        config = RunConfig(in_place=in_place)
+        state = RunState.create(source=source, config=config)
+        # Ensure .dark-factory exists for save
+        (Path(repo_root) / ".dark-factory").mkdir(exist_ok=True)
+        return state
+
+    def test_worktree_mode(self, git_repo):
+        state = self._make_state(str(git_repo), in_place=False)
+        before_count = len(_active_worktrees)
+
+        work_dir = setup_workspace(state, str(git_repo))
+
+        assert Path(work_dir).exists()
+        assert state.worktree_path == work_dir
+        assert state.branch.startswith("dark-factory/")
+        # Should NOT register for atexit
+        assert len(_active_worktrees) == before_count
+        # Clean up
+        remove_worktree(work_dir, state.branch, str(git_repo))
+
+    def test_in_place_mode(self, git_repo):
+        state = self._make_state(str(git_repo), in_place=True)
+
+        work_dir = setup_workspace(state, str(git_repo))
+
+        assert work_dir == str(git_repo)
+        assert state.worktree_path == str(git_repo)
+        assert state.branch.startswith("dark-factory/")
 
 
 class TestNoHooksSettings:

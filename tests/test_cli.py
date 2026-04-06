@@ -1,5 +1,6 @@
 """Tests for dark_factory.__main__ CLI."""
 
+import argparse
 import json
 import subprocess
 import sys
@@ -10,6 +11,10 @@ import pytest
 
 from dark_factory.__main__ import (
     build_parser,
+    cmd_prepare,
+    cmd_verify,
+    cmd_complete,
+    _load_state,
     _preflight,
     _handle_gate,
     EXIT_GATED,
@@ -140,6 +145,180 @@ class TestHandleGate:
         assert gate_json["__gate__"] == "intent"
         assert gate_json["run_id"] == state.run_id
         assert "state_file" in gate_json
+
+
+class TestBuildParserNewSubcommands:
+    def test_prepare_subcommand(self):
+        parser = build_parser()
+        args = parser.parse_args(["prepare", "abc123"])
+        assert args.command == "prepare"
+        assert args.run_id == "abc123"
+
+    def test_verify_subcommand(self):
+        parser = build_parser()
+        args = parser.parse_args(["verify", "abc123"])
+        assert args.command == "verify"
+        assert args.run_id == "abc123"
+
+    def test_complete_subcommand(self):
+        parser = build_parser()
+        args = parser.parse_args(["complete", "abc123"])
+        assert args.command == "complete"
+        assert args.run_id == "abc123"
+
+    def test_evaluate_with_run(self):
+        parser = build_parser()
+        args = parser.parse_args(["evaluate", "--run", "abc123"])
+        assert args.command == "evaluate"
+        assert args.run == "abc123"
+        assert args.branch is None
+
+    def test_evaluate_with_branch_still_works(self):
+        parser = build_parser()
+        args = parser.parse_args(["evaluate", "feature/login"])
+        assert args.branch == "feature/login"
+        assert args.run is None
+
+
+class TestLoadState:
+    def _make_state(self, tmp_path, status=RunStatus.GATED_INTENT):
+        source = SourceInfo(SourceKind.INLINE, "test", "test")
+        config = RunConfig(gates=[Gate.INTENT])
+        state = RunState.create(source=source, config=config)
+        state.status = status
+        state.save(str(tmp_path))
+        return state
+
+    def test_load_valid_state(self, tmp_path):
+        state = self._make_state(tmp_path)
+        loaded = _load_state(str(tmp_path), state.run_id, [RunStatus.GATED_INTENT])
+        assert loaded.run_id == state.run_id
+
+    def test_wrong_status_exits(self, tmp_path):
+        state = self._make_state(tmp_path, RunStatus.PENDING)
+        with pytest.raises(SystemExit):
+            _load_state(str(tmp_path), state.run_id, [RunStatus.GATED_INTENT])
+
+    def test_missing_state_exits(self, tmp_path):
+        with pytest.raises(SystemExit):
+            _load_state(str(tmp_path), "nonexistent", [RunStatus.GATED_INTENT])
+
+
+class TestCmdPrepare:
+    def _make_gated_state(self, tmp_path):
+        source = SourceInfo(SourceKind.INLINE, "test", "test")
+        config = RunConfig(gates=[Gate.INTENT])
+        state = RunState.create(source=source, config=config)
+        state.status = RunStatus.GATED_INTENT
+        state.intent = IntentDocument("Test Feature", "Do the thing", ["It works"])
+        state.save(str(tmp_path))
+        return state
+
+    def test_prepare_transitions_to_prepared(self, tmp_path, capsys):
+        state = self._make_gated_state(tmp_path)
+        args = argparse.Namespace(run_id=state.run_id)
+
+        with patch("dark_factory.__main__._get_repo_root", return_value=str(tmp_path)), \
+             patch("dark_factory.infra.setup_workspace", return_value=str(tmp_path / "work")):
+            cmd_prepare(args)
+
+        reloaded = RunState.load(state.state_path(str(tmp_path)))
+        assert reloaded.status == RunStatus.PREPARED
+
+        captured = capsys.readouterr()
+        output = json.loads(captured.out.strip())
+        assert output["run_id"] == state.run_id
+        assert "prompt_file" in output
+        assert "system_prompt_file" in output
+
+    def test_prepare_writes_prompt_files(self, tmp_path):
+        state = self._make_gated_state(tmp_path)
+        args = argparse.Namespace(run_id=state.run_id)
+
+        with patch("dark_factory.__main__._get_repo_root", return_value=str(tmp_path)), \
+             patch("dark_factory.infra.setup_workspace", return_value=str(tmp_path / "work")):
+            cmd_prepare(args)
+
+        assert state.prompt_path(str(tmp_path)).exists()
+        assert state.system_prompt_path(str(tmp_path)).exists()
+        assert "Test Feature" in state.prompt_path(str(tmp_path)).read_text()
+
+
+class TestCmdVerify:
+    def _make_prepared_state(self, tmp_path):
+        source = SourceInfo(SourceKind.INLINE, "test", "test")
+        config = RunConfig()
+        state = RunState.create(source=source, config=config)
+        state.status = RunStatus.PREPARED
+        state.worktree_path = str(tmp_path)
+        state.base_branch = "main"
+        state.save(str(tmp_path))
+        return state
+
+    def test_verify_outputs_json(self, tmp_path, capsys):
+        state = self._make_prepared_state(tmp_path)
+        args = argparse.Namespace(run_id=state.run_id)
+
+        with patch("dark_factory.__main__._get_repo_root", return_value=str(tmp_path)), \
+             patch("dark_factory.infra.run_tests", return_value=(True, "all passed")), \
+             patch("subprocess.run") as mock_run:
+            # Mock git diff
+            mock_run.return_value.stdout = "diff --git a/foo\n+bar\n"
+            mock_run.return_value.returncode = 0
+            cmd_verify(args)
+
+        captured = capsys.readouterr()
+        output = json.loads(captured.out.strip())
+        assert output["tests_passed"] is True
+        assert output["run_id"] == state.run_id
+
+    def test_verify_allows_retry(self, tmp_path, capsys):
+        """VERIFYING status is accepted — enables retry loops."""
+        source = SourceInfo(SourceKind.INLINE, "test", "test")
+        config = RunConfig()
+        state = RunState.create(source=source, config=config)
+        state.status = RunStatus.VERIFYING
+        state.worktree_path = str(tmp_path)
+        state.base_branch = "main"
+        state.save(str(tmp_path))
+        args = argparse.Namespace(run_id=state.run_id)
+
+        with patch("dark_factory.__main__._get_repo_root", return_value=str(tmp_path)), \
+             patch("dark_factory.infra.run_tests", return_value=(True, "ok")), \
+             patch("subprocess.run") as mock_run:
+            mock_run.return_value.stdout = "diff\n"
+            mock_run.return_value.returncode = 0
+            cmd_verify(args)
+
+        captured = capsys.readouterr()
+        output = json.loads(captured.out.strip())
+        assert output["tests_passed"] is True
+
+
+class TestCmdComplete:
+    def _make_gated_eval_state(self, tmp_path):
+        source = SourceInfo(SourceKind.INLINE, "test", "test")
+        config = RunConfig(gates=[Gate.EVAL])
+        state = RunState.create(source=source, config=config)
+        state.status = RunStatus.GATED_EVAL
+        state.branch = "dark-factory/test"
+        state.worktree_path = ""  # no worktree to clean
+        state.save(str(tmp_path))
+        return state
+
+    def test_complete_transitions(self, tmp_path, capsys):
+        state = self._make_gated_eval_state(tmp_path)
+        args = argparse.Namespace(run_id=state.run_id)
+
+        with patch("dark_factory.__main__._get_repo_root", return_value=str(tmp_path)):
+            cmd_complete(args)
+
+        reloaded = RunState.load(state.state_path(str(tmp_path)))
+        assert reloaded.status == RunStatus.COMPLETE
+
+        captured = capsys.readouterr()
+        output = json.loads(captured.out.strip())
+        assert output["status"] == "complete"
 
 
 class TestPreflight:

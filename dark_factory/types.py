@@ -25,6 +25,7 @@ class RunStatus(str, Enum):
     PENDING = "pending"
     INTENT_COMPLETE = "intent_complete"
     GATED_INTENT = "gated_intent"
+    PREPARED = "prepared"
     IMPLEMENTING = "implementing"
     VERIFYING = "verifying"
     EVALUATING = "evaluating"
@@ -297,6 +298,12 @@ class RunState:
 
     def diff_path(self, repo_root: str) -> Path:
         return self.state_dir(repo_root) / f"{self.run_id}.diff"
+
+    def prompt_path(self, repo_root: str) -> Path:
+        return self.state_dir(repo_root) / f"{self.run_id}.prompt.md"
+
+    def system_prompt_path(self, repo_root: str) -> Path:
+        return self.state_dir(repo_root) / f"{self.run_id}.system.md"
 
     def to_dict(self) -> dict[str, Any]:
         return {

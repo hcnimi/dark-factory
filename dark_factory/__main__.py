@@ -14,6 +14,7 @@ from . import __version__
 from .types import (
     DarkFactoryError,
     Gate,
+    IntentDocument,
     RunConfig,
     RunState,
     RunStatus,
@@ -371,8 +372,192 @@ async def _resume_pipeline(state, repo_root, run_implementation, evaluate):
     print(json.dumps(state.to_dict(), indent=2))
 
 
+def _load_state(repo_root: str, run_id: str, allowed_statuses: list[RunStatus]) -> RunState:
+    """Load and validate run state. Exits on error."""
+    state_path = Path(repo_root) / ".dark-factory" / f"{run_id}.json"
+    if not state_path.exists():
+        print(f"error: no state file for run {run_id}", file=sys.stderr)
+        sys.exit(1)
+    state = RunState.load(state_path)
+    if state.status not in allowed_statuses:
+        print(
+            f"error: run {run_id} status is {state.status.value}, "
+            f"expected one of: {', '.join(s.value for s in allowed_statuses)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return state
+
+
+def cmd_prepare(args: argparse.Namespace) -> None:
+    """Prepare workspace and prompt files for phased implementation."""
+    repo_root = _get_repo_root()
+    state = _load_state(repo_root, args.run_id, [RunStatus.GATED_INTENT])
+
+    from .infra import setup_workspace, _build_implementation_prompt, IMPLEMENTATION_SYSTEM_PROMPT
+    from .state import log_event
+
+    try:
+        work_dir = setup_workspace(state, repo_root)
+
+        prompt = _build_implementation_prompt(state.intent, work_dir)
+        prompt_file = state.prompt_path(repo_root)
+        prompt_file.write_text(prompt)
+
+        system_file = state.system_prompt_path(repo_root)
+        system_file.write_text(IMPLEMENTATION_SYSTEM_PROMPT)
+
+        state.status = RunStatus.PREPARED
+        state.save(repo_root)
+        log_event(state, repo_root, "prepared", {"work_dir": work_dir})
+
+        print(json.dumps({
+            "run_id": state.run_id,
+            "work_dir": work_dir,
+            "branch": state.branch,
+            "prompt_file": str(prompt_file),
+            "system_prompt_file": str(system_file),
+        }))
+    except DarkFactoryError as e:
+        state.status = RunStatus.FAILED
+        state.error = str(e)
+        state.save(repo_root)
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_verify(args: argparse.Namespace) -> None:
+    """Run tests and capture diff for a prepared run."""
+    repo_root = _get_repo_root()
+    state = _load_state(repo_root, args.run_id, [RunStatus.PREPARED, RunStatus.VERIFYING])
+
+    from .infra import detect_test_command, run_tests
+    from .state import log_event
+
+    try:
+        work_dir = state.worktree_path
+        if not work_dir:
+            print(f"error: run {args.run_id} has no worktree_path", file=sys.stderr)
+            sys.exit(1)
+
+        test_cmd = state.test_command or detect_test_command(work_dir)
+        passed, test_output = run_tests(test_cmd, work_dir)
+
+        # Capture diff
+        diff_result = subprocess.run(
+            ["git", "diff", f"{state.base_branch}...HEAD"],
+            capture_output=True, text=True, cwd=work_dir,
+        )
+        diff = diff_result.stdout
+        if not diff.strip():
+            diff_result = subprocess.run(
+                ["git", "diff", "HEAD"],
+                capture_output=True, text=True, cwd=work_dir,
+            )
+            diff = diff_result.stdout
+
+        state.diff_path(repo_root).write_text(diff)
+        state.status = RunStatus.VERIFYING
+        state.save(repo_root)
+        log_event(state, repo_root, "verify", {
+            "tests_passed": passed,
+            "diff_lines": len(diff.splitlines()),
+        })
+
+        print(json.dumps({
+            "run_id": state.run_id,
+            "tests_passed": passed,
+            "test_output": test_output[-3000:],
+            "diff_lines": len(diff.splitlines()),
+        }))
+    except DarkFactoryError as e:
+        state.status = RunStatus.FAILED
+        state.error = str(e)
+        state.save(repo_root)
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_complete(args: argparse.Namespace) -> None:
+    """Complete a run after evaluation approval."""
+    repo_root = _get_repo_root()
+    state = _load_state(repo_root, args.run_id, [RunStatus.GATED_EVAL])
+
+    from .infra import remove_worktree
+    from .state import log_event
+
+    # Clean up worktree if it exists and isn't the repo itself
+    if state.worktree_path and state.worktree_path != repo_root:
+        wt = Path(state.worktree_path)
+        if wt.exists():
+            remove_worktree(state.worktree_path, state.branch, repo_root)
+
+    state.status = RunStatus.COMPLETE
+    state.save(repo_root)
+    log_event(state, repo_root, "run_complete", {
+        "cost_usd": state.cost_usd,
+        "status": state.status.value,
+    })
+
+    print(json.dumps({
+        "run_id": state.run_id,
+        "status": "complete",
+        "branch": state.branch,
+        "cost_usd": state.cost_usd,
+    }))
+
+
 def cmd_evaluate(args: argparse.Namespace) -> None:
     repo_root = _get_repo_root()
+
+    # Phased flow: --run <run_id>
+    if args.run:
+        state = _load_state(repo_root, args.run, [RunStatus.VERIFYING])
+        from .evaluator import evaluate
+        from .state import log_event
+
+        diff_file = state.diff_path(repo_root)
+        if not diff_file.exists():
+            print(f"error: no diff file for run {args.run}", file=sys.stderr)
+            sys.exit(1)
+        diff = diff_file.read_text()
+
+        state.status = RunStatus.EVALUATING
+        state.save(repo_root)
+
+        report = asyncio.run(evaluate(state.intent, diff, state.config.evaluator_model))
+        state.evaluation = report
+        state.cost_usd += report.cost_usd
+        state.save(repo_root)
+        log_event(state, repo_root, "evaluation_complete", {"report": report.to_dict()})
+
+        eval_path = state.evaluation_path(repo_root)
+        eval_path.write_text(json.dumps(report.to_dict(), indent=2) + "\n")
+
+        print(report.format_for_display())
+
+        if Gate.EVAL in state.config.gates:
+            state.diff_path(repo_root).write_text(diff)
+            state.status = RunStatus.GATED_EVAL
+            state.save(repo_root)
+            log_event(state, repo_root, "gated_eval", {})
+            _handle_gate(state, repo_root, "eval",
+                         "\nAccept evaluation? [Y/n/abort] ",
+                         "aborted by user after evaluation")
+
+        state.status = RunStatus.COMPLETE
+        state.save(repo_root)
+        log_event(state, repo_root, "run_complete", {
+            "cost_usd": state.cost_usd,
+            "status": state.status.value,
+        })
+        print(json.dumps(state.to_dict(), indent=2))
+        return
+
+    # Standalone branch evaluation
+    if not args.branch:
+        print("error: either a branch or --run <run_id> is required", file=sys.stderr)
+        sys.exit(1)
 
     # Get diff
     result = subprocess.run(
@@ -389,16 +574,13 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     # Load or infer intent
-    from .types import IntentDocument
     if args.intent:
         intent_text = Path(args.intent).read_text()
-        # Parse as simple markdown: title = first heading, rest = summary, no AC
         lines = intent_text.strip().splitlines()
         title = lines[0].lstrip("# ").strip() if lines else "Unknown"
         summary = "\n".join(lines[1:]).strip()
         intent = IntentDocument(title=title, summary=summary, acceptance_criteria=[])
     else:
-        # Infer from commit messages
         log_result = subprocess.run(
             ["git", "log", "--oneline", f"main..{args.branch}"],
             capture_output=True, text=True, cwd=repo_root,
@@ -443,9 +625,22 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--in-place", action="store_true", help="Work in repo directly (no worktree)")
     run_p.add_argument("--dry-run", action="store_true", help="Plan only, no implementation")
 
+    # --- prepare ---
+    prep_p = sub.add_parser("prepare", help="Prepare workspace and prompt files for a gated run")
+    prep_p.add_argument("run_id", help="Run ID to prepare")
+
+    # --- verify ---
+    ver_p = sub.add_parser("verify", help="Run tests and capture diff for a prepared run")
+    ver_p.add_argument("run_id", help="Run ID to verify")
+
+    # --- complete ---
+    comp_p = sub.add_parser("complete", help="Complete a run after evaluation approval")
+    comp_p.add_argument("run_id", help="Run ID to complete")
+
     # --- evaluate ---
-    eval_p = sub.add_parser("evaluate", help="Evaluate a branch standalone")
-    eval_p.add_argument("branch", help="Branch to evaluate")
+    eval_p = sub.add_parser("evaluate", help="Evaluate a branch or run")
+    eval_p.add_argument("branch", nargs="?", help="Branch to evaluate")
+    eval_p.add_argument("--run", metavar="RUN_ID", help="Evaluate a phased run by its run ID")
     eval_p.add_argument("--intent", help="Path to intent document")
     eval_p.add_argument("--evaluator-model", default="claude-sonnet-4-20250514", help="Model for evaluation")
 
@@ -460,6 +655,12 @@ def main() -> None:
         cmd_init(args)
     elif args.command == "run":
         cmd_run(args)
+    elif args.command == "prepare":
+        cmd_prepare(args)
+    elif args.command == "verify":
+        cmd_verify(args)
+    elif args.command == "complete":
+        cmd_complete(args)
     elif args.command == "evaluate":
         cmd_evaluate(args)
     else:

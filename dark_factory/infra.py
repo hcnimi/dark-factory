@@ -27,10 +27,12 @@ _active_worktrees: list[tuple[str, str, str]] = []  # (worktree_path, branch, re
 # Worktree lifecycle
 # ---------------------------------------------------------------------------
 
-def create_worktree(repo_root: str, run_id: str) -> tuple[str, str]:
+def create_worktree(repo_root: str, run_id: str, register_cleanup: bool = True) -> tuple[str, str]:
     """Create a git worktree for isolated implementation.
 
     Returns (worktree_path, branch_name).
+    When register_cleanup is False, the worktree is NOT registered for atexit
+    cleanup — the caller manages its lifecycle (used by phased flow).
     """
     repo_path = Path(repo_root)
     branch = f"dark-factory/{run_id}"
@@ -43,7 +45,8 @@ def create_worktree(repo_root: str, run_id: str) -> tuple[str, str]:
     if result.returncode != 0:
         raise DarkFactoryError(f"Failed to create worktree: {result.stderr.strip()}")
 
-    _active_worktrees.append((worktree_path, branch, repo_root))
+    if register_cleanup:
+        _active_worktrees.append((worktree_path, branch, repo_root))
     return worktree_path, branch
 
 
@@ -77,6 +80,28 @@ def _cleanup_all_worktrees() -> None:
 
 
 atexit.register(_cleanup_all_worktrees)
+
+
+def setup_workspace(state: RunState, repo_root: str) -> str:
+    """Create worktree or in-place branch. Returns work_dir. Updates state in place.
+
+    Does NOT register for atexit cleanup — caller manages worktree lifecycle.
+    """
+    if state.config.in_place:
+        work_dir = repo_root
+        branch = f"dark-factory/{state.run_id}"
+        subprocess.run(
+            ["git", "checkout", "-b", branch],
+            capture_output=True, text=True, cwd=repo_root,
+        )
+        state.branch = branch
+        state.worktree_path = repo_root
+    else:
+        work_dir, branch = create_worktree(repo_root, state.run_id, register_cleanup=False)
+        state.worktree_path = work_dir
+        state.branch = branch
+    state.save(repo_root)
+    return work_dir
 
 
 # ---------------------------------------------------------------------------
@@ -239,21 +264,10 @@ async def run_implementation(
     Returns the git diff of all changes.
     """
     # Determine working directory
-    if state.config.in_place:
-        work_dir = repo_root
-        branch = f"dark-factory/{state.run_id}"
-        subprocess.run(
-            ["git", "checkout", "-b", branch],
-            capture_output=True, text=True, cwd=repo_root,
-        )
-        state.branch = branch
-        state.worktree_path = repo_root
-    else:
-        work_dir, branch = create_worktree(repo_root, state.run_id)
-        state.worktree_path = work_dir
-        state.branch = branch
-
-    state.save(repo_root)
+    work_dir = setup_workspace(state, repo_root)
+    # Re-register for atexit cleanup (monolithic flow owns the full lifecycle)
+    if not state.config.in_place:
+        _active_worktrees.append((state.worktree_path, state.branch, repo_root))
 
     # Build security policy with write boundary
     policy = default_policy(write_boundary=Path(work_dir))
