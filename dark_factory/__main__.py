@@ -84,7 +84,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         gitignore.write_text("# dark-factory run artifacts\n*.json\n*.jsonl\n")
 
     # Install/update the Claude Code slash command
-    _install_command()
+    _install_command(repo_root)
 
     test_cmd = detect_test_command(repo_root)
     claude_md = Path(repo_root) / "CLAUDE.md"
@@ -94,13 +94,13 @@ def cmd_init(args: argparse.Namespace) -> None:
     print(f"  CLAUDE.md: {'present' if claude_md.exists() else 'missing (recommended)'}")
 
 
-def _install_command() -> None:
-    """Install the /dark-factory slash command to ~/.claude/commands/."""
+def _install_command(repo_root: str) -> None:
+    """Install the /dark-factory slash command into the project's .claude/commands/."""
     template = Path(__file__).parent / "commands" / "dark-factory.md"
     if not template.exists():
         return
 
-    dest_dir = Path.home() / ".claude" / "commands"
+    dest_dir = Path(repo_root) / ".claude" / "commands"
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / "dark-factory.md"
 
