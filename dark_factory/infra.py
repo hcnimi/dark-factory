@@ -165,6 +165,16 @@ def _build_implementation_prompt(intent: IntentDocument, work_dir: str) -> str:
     )
 
 
+async def _prompt_as_stream(prompt_text: str):
+    """Wrap a string prompt as an AsyncIterable for streaming mode."""
+    yield {
+        "type": "user",
+        "message": {"role": "user", "content": prompt_text},
+        "parent_tool_use_id": None,
+        "session_id": None,
+    }
+
+
 async def _launch_agent(
     prompt: str,
     work_dir: str,
@@ -180,7 +190,7 @@ async def _launch_agent(
     try:
         messages: list[Message] = []
         async for msg in query(
-            prompt=prompt,
+            prompt=_prompt_as_stream(prompt),
             options=ClaudeCodeOptions(
                 system_prompt=IMPLEMENTATION_SYSTEM_PROMPT,
                 model="claude-opus-4-20250514",
