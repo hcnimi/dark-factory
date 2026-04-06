@@ -135,6 +135,18 @@ async def _run_pipeline(state, repo_root, clarify_intent, run_implementation, ev
         if answer in ("n", "abort", "a"):
             raise DarkFactoryError("aborted by user after intent review")
 
+    # Dry run stops after intent clarification
+    if state.config.dry_run:
+        state.status = RunStatus.COMPLETE
+        state.save(repo_root)
+        log_event(state, repo_root, "dry_run_complete", {
+            "cost_usd": state.cost_usd,
+            "status": state.status.value,
+        })
+        print(f"\nDry run {state.run_id} complete | cost: ${state.cost_usd:.4f}")
+        print(json.dumps(state.to_dict(), indent=2))
+        return
+
     # --- Implementation ---
     print("\n--- Implementation ---")
     state.status = RunStatus.IMPLEMENTING
