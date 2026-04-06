@@ -24,9 +24,11 @@ class SourceKind(str, Enum):
 class RunStatus(str, Enum):
     PENDING = "pending"
     INTENT_COMPLETE = "intent_complete"
+    GATED_INTENT = "gated_intent"
     IMPLEMENTING = "implementing"
     VERIFYING = "verifying"
     EVALUATING = "evaluating"
+    GATED_EVAL = "gated_eval"
     COMPLETE = "complete"
     FAILED = "failed"
 
@@ -292,6 +294,9 @@ class RunState:
 
     def evaluation_path(self, repo_root: str) -> Path:
         return self.state_dir(repo_root) / f"{self.run_id}.evaluation.json"
+
+    def diff_path(self, repo_root: str) -> Path:
+        return self.state_dir(repo_root) / f"{self.run_id}.diff"
 
     def to_dict(self) -> dict[str, Any]:
         return {

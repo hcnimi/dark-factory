@@ -20,6 +20,33 @@ from .types import (
     classify_source,
 )
 
+# Exit code for "paused at gate, resume to continue" (EX_TEMPFAIL)
+EXIT_GATED = 75
+
+
+def _handle_gate(
+    state: RunState,
+    repo_root: str,
+    gate_type: str,
+    prompt_msg: str,
+    abort_msg: str,
+) -> str:
+    """Handle a gate: input() on TTY, exit 75 on non-TTY."""
+    if sys.stdin.isatty():
+        answer = input(prompt_msg).strip().lower()
+        if answer in ("n", "abort", "a", "q", "quit"):
+            raise DarkFactoryError(abort_msg)
+        return answer
+
+    # Non-TTY: emit gate marker and exit for the caller to resume
+    gate_info = {
+        "__gate__": gate_type,
+        "run_id": state.run_id,
+        "state_file": str(state.state_path(repo_root)),
+    }
+    print(json.dumps(gate_info))
+    sys.exit(EXIT_GATED)
+
 
 def _get_repo_root() -> str:
     result = subprocess.run(
@@ -94,6 +121,49 @@ def cmd_run(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     repo_root = _get_repo_root()
+
+    # Import here to avoid circular / heavy imports at CLI parse time
+    from .infra import run_implementation
+    from .evaluator import evaluate
+
+    # --- Resume path ---
+    if args.resume:
+        if args.input:
+            print("error: cannot use both --resume and a positional input", file=sys.stderr)
+            sys.exit(1)
+        state_path = Path(repo_root) / ".dark-factory" / f"{args.resume}.json"
+        if not state_path.exists():
+            print(f"error: no state file for run {args.resume}", file=sys.stderr)
+            sys.exit(1)
+        state = RunState.load(state_path)
+        if state.status not in (RunStatus.GATED_INTENT, RunStatus.GATED_EVAL):
+            print(
+                f"error: run {args.resume} is not at a gate (status: {state.status.value})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"Resuming run {state.run_id} from {state.status.value}")
+        try:
+            asyncio.run(_resume_pipeline(state, repo_root, run_implementation, evaluate))
+        except DarkFactoryError as e:
+            state.status = RunStatus.FAILED
+            state.error = str(e)
+            state.save(repo_root)
+            print(f"\nerror: {e}", file=sys.stderr)
+            sys.exit(1)
+        except KeyboardInterrupt:
+            state.status = RunStatus.FAILED
+            state.error = "interrupted by user"
+            state.save(repo_root)
+            print("\ninterrupted", file=sys.stderr)
+            sys.exit(130)
+        return
+
+    # --- Fresh run path ---
+    if not args.input:
+        print("error: input is required (Jira key, file path, or description)", file=sys.stderr)
+        sys.exit(1)
+
     source = classify_source(args.input)
 
     gates: list[Gate] = []
@@ -111,17 +181,13 @@ def cmd_run(args: argparse.Namespace) -> None:
     )
 
     from .infra import detect_test_command
+    from .intent import clarify_intent
 
     state = RunState.create(source=source, config=config)
     state.test_command = detect_test_command(repo_root)
     state.save(repo_root)
 
     print(f"Run {state.run_id} | source: {source.kind.value} | id: {source.id}")
-
-    # Import here to avoid circular / heavy imports at CLI parse time
-    from .intent import clarify_intent
-    from .infra import run_implementation
-    from .evaluator import evaluate
 
     try:
         asyncio.run(_run_pipeline(state, repo_root, clarify_intent, run_implementation, evaluate))
@@ -154,9 +220,12 @@ async def _run_pipeline(state, repo_root, clarify_intent, run_implementation, ev
 
     # Human gate after intent
     if Gate.INTENT in state.config.gates:
-        answer = input("\nProceed with implementation? [Y/n/abort] ").strip().lower()
-        if answer in ("n", "abort", "a"):
-            raise DarkFactoryError("aborted by user after intent review")
+        state.status = RunStatus.GATED_INTENT
+        state.save(repo_root)
+        log_event(state, repo_root, "gated_intent", {})
+        _handle_gate(state, repo_root, "intent",
+                     "\nProceed with implementation? [Y/n/abort] ",
+                     "aborted by user after intent review")
 
     # Dry run stops after intent clarification
     if state.config.dry_run:
@@ -201,13 +270,94 @@ async def _run_pipeline(state, repo_root, clarify_intent, run_implementation, ev
 
     # Human gate after evaluation
     if Gate.EVAL in state.config.gates:
+        state.diff_path(repo_root).write_text(state.diff)
+        state.status = RunStatus.GATED_EVAL
+        state.save(repo_root)
+        log_event(state, repo_root, "gated_eval", {})
         if report.is_borderline():
-            print("\nBorderline scores detected. Options: [a]ccept / [r]e-run / [q]uit")
+            prompt = "\nBorderline scores detected. Options: [a]ccept / [r]e-run / [q]uit\nChoice: "
         else:
-            print("\nOptions: [a]ccept / [q]uit")
-        answer = input("Choice: ").strip().lower()
-        if answer in ("q", "quit", "abort"):
-            raise DarkFactoryError("aborted by user after evaluation")
+            prompt = "\nOptions: [a]ccept / [q]uit\nChoice: "
+        _handle_gate(state, repo_root, "eval", prompt,
+                     "aborted by user after evaluation")
+
+    # --- Complete ---
+    state.status = RunStatus.COMPLETE
+    state.save(repo_root)
+    log_event(state, repo_root, "run_complete", {
+        "cost_usd": state.cost_usd,
+        "status": state.status.value,
+    })
+
+    print(f"\nRun {state.run_id} complete | cost: ${state.cost_usd:.4f}")
+    print(json.dumps(state.to_dict(), indent=2))
+
+
+async def _resume_pipeline(state, repo_root, run_implementation, evaluate):
+    """Resume a pipeline that was paused at a gate."""
+    from .state import log_event
+
+    log_event(state, repo_root, "gate_approved", {"gate": state.status.value})
+
+    if state.status == RunStatus.GATED_INTENT:
+        # Dry run stops after intent clarification
+        if state.config.dry_run:
+            state.status = RunStatus.COMPLETE
+            state.save(repo_root)
+            log_event(state, repo_root, "dry_run_complete", {
+                "cost_usd": state.cost_usd,
+                "status": state.status.value,
+            })
+            print(f"\nDry run {state.run_id} complete | cost: ${state.cost_usd:.4f}")
+            print(json.dumps(state.to_dict(), indent=2))
+            return
+
+        # --- Implementation ---
+        print("\n--- Implementation ---")
+        state.status = RunStatus.IMPLEMENTING
+        state.save(repo_root)
+        log_event(state, repo_root, "implementation_started", {})
+
+        diff = await run_implementation(state, state.intent, repo_root)
+        state.diff = diff
+        state.status = RunStatus.VERIFYING
+        state.save(repo_root)
+        log_event(state, repo_root, "implementation_complete", {"diff_lines": len(diff.splitlines())})
+
+        # --- Evaluation ---
+        print("\n--- Evaluation ---")
+        state.status = RunStatus.EVALUATING
+        state.save(repo_root)
+
+        report = await evaluate(state.intent, diff, state.config.evaluator_model)
+        state.evaluation = report
+        state.cost_usd += report.cost_usd
+        state.save(repo_root)
+        log_event(state, repo_root, "evaluation_complete", {"report": report.to_dict()})
+
+        eval_path = state.evaluation_path(repo_root)
+        eval_path.write_text(json.dumps(report.to_dict(), indent=2) + "\n")
+
+        print(report.format_for_display())
+
+        # Eval gate (if configured, still fires on resume from intent gate)
+        if Gate.EVAL in state.config.gates:
+            state.diff_path(repo_root).write_text(state.diff)
+            state.status = RunStatus.GATED_EVAL
+            state.save(repo_root)
+            log_event(state, repo_root, "gated_eval", {})
+            if report.is_borderline():
+                prompt = "\nBorderline scores detected. Options: [a]ccept / [r]e-run / [q]uit\nChoice: "
+            else:
+                prompt = "\nOptions: [a]ccept / [q]uit\nChoice: "
+            _handle_gate(state, repo_root, "eval", prompt,
+                         "aborted by user after evaluation")
+
+    elif state.status == RunStatus.GATED_EVAL:
+        # Load diff from file (not serialized in state JSON)
+        diff_file = state.diff_path(repo_root)
+        if diff_file.exists():
+            state.diff = diff_file.read_text()
 
     # --- Complete ---
     state.status = RunStatus.COMPLETE
@@ -284,7 +434,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- run ---
     run_p = sub.add_parser("run", help="Run the full intent → implement → evaluate pipeline")
-    run_p.add_argument("input", help="Jira key, file path, or inline description")
+    run_p.add_argument("input", nargs="?", help="Jira key, file path, or inline description")
+    run_p.add_argument("--resume", metavar="RUN_ID", help="Resume a gated run by its run ID")
     run_p.add_argument("--max-cost", type=float, default=10.0, help="Max cost in USD (default: 10)")
     run_p.add_argument("--evaluator-model", default="claude-sonnet-4-20250514", help="Model for evaluation")
     run_p.add_argument("--gate-intent", action="store_true", help="Pause for approval after intent")

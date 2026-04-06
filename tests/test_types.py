@@ -133,9 +133,10 @@ class TestRunConfig:
 
 
 class TestRunState:
-    def _make_state(self):
+    def _make_state(self, gates=None):
         source = SourceInfo(SourceKind.INLINE, "add feature", "add-feature")
-        return RunState.create(source=source, config=RunConfig())
+        config = RunConfig(gates=gates or [])
+        return RunState.create(source=source, config=config)
 
     def test_create_generates_id(self):
         state = self._make_state()
@@ -163,6 +164,31 @@ class TestRunState:
         assert loaded.intent is not None
         assert loaded.intent.title == "T"
         assert loaded.status == RunStatus.INTENT_COMPLETE
+
+    def test_gated_intent_roundtrip(self, tmp_path):
+        state = self._make_state(gates=[Gate.INTENT])
+        state.intent = IntentDocument("T", "S", ["AC1"])
+        state.status = RunStatus.GATED_INTENT
+        state.save(str(tmp_path))
+
+        loaded = RunState.load(state.state_path(str(tmp_path)))
+        assert loaded.status == RunStatus.GATED_INTENT
+        assert loaded.config.gates == [Gate.INTENT]
+        assert loaded.intent.title == "T"
+
+    def test_gated_eval_roundtrip(self, tmp_path):
+        state = self._make_state(gates=[Gate.EVAL])
+        state.status = RunStatus.GATED_EVAL
+        state.save(str(tmp_path))
+
+        loaded = RunState.load(state.state_path(str(tmp_path)))
+        assert loaded.status == RunStatus.GATED_EVAL
+
+    def test_diff_path(self, tmp_path):
+        state = self._make_state()
+        path = state.diff_path(str(tmp_path))
+        assert path.name == f"{state.run_id}.diff"
+        assert path.parent.name == ".dark-factory"
 
     def test_state_dir_created(self, tmp_path):
         state = self._make_state()
