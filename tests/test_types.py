@@ -10,6 +10,7 @@ from dark_factory.types import (
     SourceKind,
     SourceInfo,
     classify_source,
+    read_directory_specs,
     RunStatus,
     Gate,
     CriterionStatus,
@@ -51,11 +52,66 @@ class TestSourceClassification:
         assert result.kind == SourceKind.INLINE
         assert result.id == "add-user-preferences-endpoint"
 
+    def test_classify_directory(self, tmp_path):
+        spec_dir = tmp_path / "specs"
+        spec_dir.mkdir()
+        (spec_dir / "overview.md").write_text("# Overview")
+        result = classify_source(str(spec_dir))
+        assert result.kind == SourceKind.DIRECTORY
+        assert result.id == "specs"
+
+    def test_classify_directory_trailing_slash(self, tmp_path):
+        spec_dir = tmp_path / "my-specs"
+        spec_dir.mkdir()
+        (spec_dir / "a.md").write_text("# A")
+        result = classify_source(str(spec_dir) + "/")
+        assert result.kind == SourceKind.DIRECTORY
+        assert result.id == "my-specs"
+
     def test_source_info_roundtrip(self):
         si = SourceInfo(kind=SourceKind.JIRA, raw="DPPT-123", id="DPPT-123")
         d = si.to_dict()
         restored = SourceInfo.from_dict(d)
         assert restored == si
+
+    def test_source_info_roundtrip_directory(self):
+        si = SourceInfo(kind=SourceKind.DIRECTORY, raw="/tmp/specs", id="specs")
+        d = si.to_dict()
+        restored = SourceInfo.from_dict(d)
+        assert restored == si
+
+
+class TestReadDirectorySpecs:
+    def test_reads_md_files(self, tmp_path):
+        (tmp_path / "a.md").write_text("# A")
+        (tmp_path / "b.md").write_text("# B")
+        (tmp_path / "ignore.txt").write_text("not included")
+        content = read_directory_specs(str(tmp_path))
+        assert "# A" in content
+        assert "# B" in content
+        assert "not included" not in content
+
+    def test_recursive_md(self, tmp_path):
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "deep.md").write_text("# Deep")
+        content = read_directory_specs(str(tmp_path))
+        assert "# Deep" in content
+
+    def test_empty_directory_raises(self, tmp_path):
+        with pytest.raises(DarkFactoryError, match="No .md files"):
+            read_directory_specs(str(tmp_path))
+
+    def test_file_headers_included(self, tmp_path):
+        (tmp_path / "spec.md").write_text("content")
+        content = read_directory_specs(str(tmp_path))
+        assert "<!-- file: spec.md -->" in content
+
+    def test_sorted_deterministic(self, tmp_path):
+        (tmp_path / "z.md").write_text("last")
+        (tmp_path / "a.md").write_text("first")
+        content = read_directory_specs(str(tmp_path))
+        assert content.index("first") < content.index("last")
 
 
 class TestIntentDocument:

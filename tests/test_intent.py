@@ -31,6 +31,24 @@ class TestBuildIntentPrompt:
         prompt = build_intent_prompt(source)
         assert "DPPT-123" in prompt
 
+    def test_directory_source(self, tmp_path):
+        spec_dir = tmp_path / "specs"
+        spec_dir.mkdir()
+        (spec_dir / "overview.md").write_text("# Multi-File Spec\nDetails here")
+        source = SourceInfo(SourceKind.DIRECTORY, str(spec_dir), "specs")
+        prompt = build_intent_prompt(source)
+        assert "Multi-File Spec" in prompt
+        assert "spec files" in prompt
+
+    def test_directory_source_with_interview_context(self, tmp_path):
+        spec_dir = tmp_path / "specs"
+        spec_dir.mkdir()
+        (spec_dir / "overview.md").write_text("# Feature")
+        source = SourceInfo(SourceKind.DIRECTORY, str(spec_dir), "specs")
+        prompt = build_intent_prompt(source, interview_context="Q1: Scope?\nA1: Everything")
+        assert "Additional Context" in prompt
+        assert "Scope?" in prompt
+
     def test_interview_context_none_unchanged(self):
         source = SourceInfo(SourceKind.INLINE, "add dark mode", "add-dark-mode")
         prompt_without = build_intent_prompt(source)
