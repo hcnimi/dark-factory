@@ -31,6 +31,21 @@ class TestBuildIntentPrompt:
         prompt = build_intent_prompt(source)
         assert "DPPT-123" in prompt
 
+    def test_interview_context_none_unchanged(self):
+        source = SourceInfo(SourceKind.INLINE, "add dark mode", "add-dark-mode")
+        prompt_without = build_intent_prompt(source)
+        prompt_with_none = build_intent_prompt(source, interview_context=None)
+        assert prompt_without == prompt_with_none
+        assert "Additional Context" not in prompt_without
+
+    def test_interview_context_appended(self):
+        source = SourceInfo(SourceKind.INLINE, "add dark mode", "add-dark-mode")
+        context = "Q1: What scope?\nA1: All pages"
+        prompt = build_intent_prompt(source, interview_context=context)
+        assert "Additional Context from Clarification" in prompt
+        assert "What scope?" in prompt
+        assert "All pages" in prompt
+
 
 class TestParseIntentResponse:
     def test_valid_json(self):

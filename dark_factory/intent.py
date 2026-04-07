@@ -28,26 +28,37 @@ Rules:
 """
 
 
-def build_intent_prompt(source: SourceInfo) -> str:
+def build_intent_prompt(source: SourceInfo, interview_context: str | None = None) -> str:
     """Build the user prompt for intent clarification."""
     if source.kind == SourceKind.INLINE:
-        return (
+        prompt = (
             f"Produce an intent document for this feature request:\n\n"
             f"{source.raw}"
         )
-    if source.kind == SourceKind.FILE:
+    elif source.kind == SourceKind.FILE:
         # For file input, the raw field contains the path; read it
         from pathlib import Path
         content = Path(source.raw).read_text()
-        return (
+        prompt = (
             f"Produce an intent document based on this spec file:\n\n"
             f"{content}"
         )
-    # Jira — not in MVP, but stub the prompt
-    return (
-        f"Produce an intent document for Jira ticket {source.raw}.\n"
-        f"(Ticket details would be fetched from Jira API)"
-    )
+    else:
+        # Jira — not in MVP, but stub the prompt
+        prompt = (
+            f"Produce an intent document for Jira ticket {source.raw}.\n"
+            f"(Ticket details would be fetched from Jira API)"
+        )
+
+    if interview_context:
+        prompt += (
+            "\n\n## Additional Context from Clarification\n\n"
+            f"{interview_context}\n\n"
+            "Use this context to produce more precise and complete acceptance criteria "
+            "that address the edge cases and assumptions surfaced above."
+        )
+
+    return prompt
 
 
 def parse_intent_response(text: str) -> IntentDocument:
@@ -68,11 +79,17 @@ def parse_intent_response(text: str) -> IntentDocument:
     )
 
 
-async def clarify_intent(source: SourceInfo) -> IntentDocument:
-    """Run intent clarification via SDK call to Sonnet."""
+async def clarify_intent(
+    source: SourceInfo,
+    interview_context: str | None = None,
+) -> tuple[IntentDocument, float]:
+    """Run intent clarification via SDK call to Sonnet.
+
+    Returns (IntentDocument, cost_usd).
+    """
     from claude_code_sdk import query, ClaudeCodeOptions, Message
 
-    prompt = build_intent_prompt(source)
+    prompt = build_intent_prompt(source, interview_context)
 
     messages: list[Message] = []
     async for msg in query(
@@ -86,8 +103,8 @@ async def clarify_intent(source: SourceInfo) -> IntentDocument:
     ):
         messages.append(msg)
 
-    full_text, _cost = extract_sdk_result(messages)
+    full_text, cost = extract_sdk_result(messages)
     if not full_text.strip():
         raise DarkFactoryError("Intent clarification returned empty response")
 
-    return parse_intent_response(full_text)
+    return parse_intent_response(full_text), cost

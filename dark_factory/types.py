@@ -117,6 +117,23 @@ class IntentDocument:
 
 
 # ---------------------------------------------------------------------------
+# Interview
+# ---------------------------------------------------------------------------
+
+@dataclass
+class InterviewQA:
+    question: str
+    answer: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"question": self.question, "answer": self.answer}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> InterviewQA:
+        return cls(question=d["question"], answer=d["answer"])
+
+
+# ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------
 
@@ -212,6 +229,54 @@ class EvaluationReport:
 
 
 # ---------------------------------------------------------------------------
+# Spec Analysis
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SpecAnalysisReport:
+    scores: list[DimensionScore]
+    suggestions: list[str]
+    model_used: str
+    cost_usd: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "scores": [s.to_dict() for s in self.scores],
+            "suggestions": self.suggestions,
+            "model_used": self.model_used,
+            "cost_usd": self.cost_usd,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> SpecAnalysisReport:
+        return cls(
+            scores=[DimensionScore.from_dict(s) for s in d["scores"]],
+            suggestions=d.get("suggestions", []),
+            model_used=d["model_used"],
+            cost_usd=d["cost_usd"],
+        )
+
+    def has_warnings(self) -> bool:
+        """Any dimension scoring below 7 is a warning."""
+        return any(s.score < 7 for s in self.scores)
+
+    def format_for_display(self) -> str:
+        lines = ["## Spec Analysis", ""]
+        lines.append("### Scores")
+        for s in self.scores:
+            marker = " (!)" if s.score < 7 else ""
+            lines.append(f"  - **{s.dimension}**: {s.score}/10{marker} — {s.justification}")
+        if self.suggestions:
+            lines.append("")
+            lines.append("### Suggestions")
+            for sug in self.suggestions:
+                lines.append(f"  - {sug}")
+        lines.append("")
+        lines.append(f"Model: {self.model_used} | Cost: ${self.cost_usd:.4f}")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Security
 # ---------------------------------------------------------------------------
 
@@ -233,6 +298,7 @@ class RunConfig:
     gates: list[Gate] = field(default_factory=list)
     in_place: bool = False
     dry_run: bool = False
+    analyze_spec: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -241,6 +307,7 @@ class RunConfig:
             "gates": [g.value for g in self.gates],
             "in_place": self.in_place,
             "dry_run": self.dry_run,
+            "analyze_spec": self.analyze_spec,
         }
 
     @classmethod
@@ -251,6 +318,7 @@ class RunConfig:
             gates=[Gate(g) for g in d.get("gates", [])],
             in_place=d.get("in_place", False),
             dry_run=d.get("dry_run", False),
+            analyze_spec=d.get("analyze_spec", False),
         )
 
 
@@ -264,6 +332,13 @@ def _new_run_id() -> str:
 
 @dataclass
 class RunState:
+    """Pipeline run state, serialized to .dark-factory/<run_id>.json.
+
+    Note: ``diff`` and ``evaluation`` are stored in dedicated side-files
+    (<run_id>.diff, <run_id>.evaluation.json), not in the JSON state.
+    They are reloaded explicitly on resume (see _resume_pipeline).
+    """
+
     run_id: str
     source: SourceInfo
     config: RunConfig
@@ -275,6 +350,8 @@ class RunState:
     cost_usd: float = 0.0
     diff: str = ""
     evaluation: EvaluationReport | None = None
+    interview: list[InterviewQA] | None = None
+    spec_analysis: SpecAnalysisReport | None = None
     test_command: str = ""
     error: str = ""
 
@@ -305,6 +382,9 @@ class RunState:
     def system_prompt_path(self, repo_root: str) -> Path:
         return self.state_dir(repo_root) / f"{self.run_id}.system.md"
 
+    def source_context_path(self, repo_root: str) -> Path:
+        return self.state_dir(repo_root) / f"{self.run_id}.source.md"
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
@@ -316,12 +396,20 @@ class RunState:
             "branch": self.branch,
             "base_branch": self.base_branch,
             "cost_usd": self.cost_usd,
+            "interview": [qa.to_dict() for qa in self.interview] if self.interview else None,
+            "spec_analysis": self.spec_analysis.to_dict() if self.spec_analysis else None,
             "test_command": self.test_command,
             "error": self.error,
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> RunState:
+        interview_data = d.get("interview")
+        interview = [InterviewQA.from_dict(qa) for qa in interview_data] if interview_data else None
+
+        spec_data = d.get("spec_analysis")
+        spec_analysis = SpecAnalysisReport.from_dict(spec_data) if spec_data else None
+
         return cls(
             run_id=d["run_id"],
             source=SourceInfo.from_dict(d["source"]),
@@ -332,6 +420,8 @@ class RunState:
             branch=d.get("branch", ""),
             base_branch=d.get("base_branch", "main"),
             cost_usd=d.get("cost_usd", 0.0),
+            interview=interview,
+            spec_analysis=spec_analysis,
             test_command=d.get("test_command", ""),
             error=d.get("error", ""),
         )

@@ -62,7 +62,7 @@ class TestRunPipeline:
         intent = _make_intent()
         report = _make_report()
 
-        mock_clarify = AsyncMock(return_value=intent)
+        mock_clarify = AsyncMock(return_value=(intent, 0.01))
         mock_implement = AsyncMock(return_value="diff content here")
         mock_evaluate = AsyncMock(return_value=report)
 
@@ -74,7 +74,8 @@ class TestRunPipeline:
         assert state.status == RunStatus.COMPLETE
         assert state.intent == intent
         assert state.evaluation == report
-        assert state.cost_usd == report.cost_usd
+        # Cost = intent (0.01) + evaluation (0.05)
+        assert state.cost_usd == pytest.approx(0.06)
         mock_clarify.assert_awaited_once()
         mock_implement.assert_awaited_once()
         mock_evaluate.assert_awaited_once()
@@ -84,7 +85,7 @@ class TestRunPipeline:
         """State is saved to disk at each transition."""
         state = _make_state(tmp_path)
 
-        mock_clarify = AsyncMock(return_value=_make_intent())
+        mock_clarify = AsyncMock(return_value=(_make_intent(), 0.01))
         mock_implement = AsyncMock(return_value="diff")
         mock_evaluate = AsyncMock(return_value=_make_report())
 
@@ -104,7 +105,7 @@ class TestRunPipeline:
         """JSONL events are logged throughout the pipeline."""
         state = _make_state(tmp_path)
 
-        mock_clarify = AsyncMock(return_value=_make_intent())
+        mock_clarify = AsyncMock(return_value=(_make_intent(), 0.01))
         mock_implement = AsyncMock(return_value="diff")
         mock_evaluate = AsyncMock(return_value=_make_report())
 
@@ -128,7 +129,7 @@ class TestRunPipeline:
         """Evaluation JSON report is written to disk."""
         state = _make_state(tmp_path)
 
-        mock_clarify = AsyncMock(return_value=_make_intent())
+        mock_clarify = AsyncMock(return_value=(_make_intent(), 0.01))
         mock_implement = AsyncMock(return_value="diff")
         mock_evaluate = AsyncMock(return_value=_make_report())
 
@@ -147,7 +148,7 @@ class TestRunPipeline:
         """Intent gate abort raises DarkFactoryError."""
         state = _make_state(tmp_path, gates=[Gate.INTENT])
 
-        mock_clarify = AsyncMock(return_value=_make_intent())
+        mock_clarify = AsyncMock(return_value=(_make_intent(), 0.01))
         mock_implement = AsyncMock()
         mock_evaluate = AsyncMock()
 
@@ -168,7 +169,7 @@ class TestRunPipeline:
         """Eval gate abort raises DarkFactoryError."""
         state = _make_state(tmp_path, gates=[Gate.EVAL])
 
-        mock_clarify = AsyncMock(return_value=_make_intent())
+        mock_clarify = AsyncMock(return_value=(_make_intent(), 0.01))
         mock_implement = AsyncMock(return_value="diff")
         mock_evaluate = AsyncMock(return_value=_make_report())
 
@@ -187,7 +188,7 @@ class TestRunPipeline:
         state = _make_state(tmp_path)
         state.cost_usd = 2.0  # Simulate implementation cost already accumulated
 
-        mock_clarify = AsyncMock(return_value=_make_intent())
+        mock_clarify = AsyncMock(return_value=(_make_intent(), 0.01))
         mock_implement = AsyncMock(return_value="diff")
         mock_evaluate = AsyncMock(return_value=_make_report(cost=0.10))
 
@@ -196,15 +197,15 @@ class TestRunPipeline:
             mock_clarify, mock_implement, mock_evaluate,
         )
 
-        # 2.0 (existing) + 0.10 (evaluation)
-        assert state.cost_usd == pytest.approx(2.10)
+        # 2.0 (existing) + 0.01 (intent) + 0.10 (evaluation)
+        assert state.cost_usd == pytest.approx(2.11)
 
     @pytest.mark.asyncio
     async def test_implementation_error_propagates(self, tmp_path):
         """Errors from implementation propagate up."""
         state = _make_state(tmp_path)
 
-        mock_clarify = AsyncMock(return_value=_make_intent())
+        mock_clarify = AsyncMock(return_value=(_make_intent(), 0.01))
         mock_implement = AsyncMock(side_effect=DarkFactoryError("agent crashed"))
         mock_evaluate = AsyncMock()
 

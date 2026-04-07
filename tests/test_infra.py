@@ -100,6 +100,18 @@ class TestBuildImplementationPrompt:
         assert "Returns 200" in prompt
         assert "/tmp/work" in prompt
 
+    def test_with_source_context(self):
+        intent = IntentDocument("Add Login", "JWT auth", ["Returns 200"])
+        prompt = _build_implementation_prompt(intent, "/tmp/work", source_context="# Detailed Spec\nFull details here")
+        assert "Original Specification" in prompt
+        assert "Detailed Spec" in prompt
+        assert "Full details here" in prompt
+
+    def test_without_source_context(self):
+        intent = IntentDocument("Add Login", "JWT auth", ["Returns 200"])
+        prompt = _build_implementation_prompt(intent, "/tmp/work", source_context="")
+        assert "Original Specification" not in prompt
+
 
 class TestCleanupWorktreeOnly:
     @pytest.fixture

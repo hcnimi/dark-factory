@@ -176,18 +176,23 @@ file, read it first for project-specific instructions.
 """
 
 
-def _build_implementation_prompt(intent: IntentDocument, work_dir: str) -> str:
+def _build_implementation_prompt(intent: IntentDocument, work_dir: str, source_context: str = "") -> str:
     """Build the prompt for the implementation agent."""
     ac_text = "\n".join(f"  {i}. {ac}" for i, ac in enumerate(intent.acceptance_criteria, 1))
-    return (
-        f"# Feature: {intent.title}\n\n"
-        f"{intent.summary}\n\n"
-        f"## Acceptance Criteria\n{ac_text}\n\n"
+    parts = [
+        f"# Feature: {intent.title}\n\n",
+        f"{intent.summary}\n\n",
+        f"## Acceptance Criteria\n{ac_text}\n\n",
+    ]
+    if source_context:
+        parts.append(f"## Original Specification\n\n{source_context}\n\n")
+    parts.append(
         f"## Working Directory\n{work_dir}\n\n"
         f"Implement this feature. Start by reading CLAUDE.md if it exists, "
         f"then explore the codebase, implement the changes, write tests, "
         f"and verify everything works. Commit your work when done."
     )
+    return "".join(parts)
 
 
 async def _prompt_as_stream(prompt_text: str):
@@ -272,10 +277,14 @@ async def run_implementation(
     # Build security policy with write boundary
     policy = default_policy(write_boundary=Path(work_dir))
 
+    # Read preserved source context
+    ctx_path = state.source_context_path(repo_root)
+    source_context = ctx_path.read_text() if ctx_path.exists() else ""
+
     # Launch implementation agent
     print(f"  Launching Opus agent in {work_dir}")
     start = time.time()
-    prompt = _build_implementation_prompt(intent, work_dir)
+    prompt = _build_implementation_prompt(intent, work_dir, source_context)
     output, cost = await _launch_agent(prompt, work_dir, policy)
     elapsed = time.time() - start
     state.cost_usd += cost

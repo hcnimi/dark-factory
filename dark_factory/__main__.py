@@ -15,9 +15,11 @@ from .types import (
     DarkFactoryError,
     Gate,
     IntentDocument,
+    InterviewQA,
     RunConfig,
     RunState,
     RunStatus,
+    SourceKind,
     classify_source,
 )
 
@@ -45,6 +47,9 @@ def _handle_gate(
         "run_id": state.run_id,
         "state_file": str(state.state_path(repo_root)),
     }
+    # Include unanswered clarification questions for the orchestrator
+    if state.interview and any(not qa.answer for qa in state.interview):
+        gate_info["clarifications"] = [qa.question for qa in state.interview if not qa.answer]
     print(json.dumps(gate_info))
     sys.exit(EXIT_GATED)
 
@@ -179,6 +184,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         gates=gates,
         in_place=args.in_place,
         dry_run=args.dry_run,
+        analyze_spec=args.analyze_spec,
     )
 
     from .infra import detect_test_command
@@ -191,7 +197,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     print(f"Run {state.run_id} | source: {source.kind.value} | id: {source.id}")
 
     try:
-        asyncio.run(_run_pipeline(state, repo_root, clarify_intent, run_implementation, evaluate))
+        asyncio.run(_run_pipeline(state, repo_root, clarify_intent, run_implementation, evaluate, no_assess=args.no_assess))
     except DarkFactoryError as e:
         state.status = RunStatus.FAILED
         state.error = str(e)
@@ -206,18 +212,80 @@ def cmd_run(args: argparse.Namespace) -> None:
         sys.exit(130)
 
 
-async def _run_pipeline(state, repo_root, clarify_intent, run_implementation, evaluate):
+def _read_source_content(source) -> str:
+    """Read the full source content for context preservation."""
+    if source.kind == SourceKind.FILE:
+        from pathlib import Path
+        path = Path(source.raw)
+        if path.exists():
+            return path.read_text()
+    # TODO: When JIRA support lands, fetch ticket summary + description
+    # from the JIRA API so the implementation agent receives full context.
+    return source.raw  # INLINE: raw IS the content; JIRA: returns key as placeholder
+
+
+async def _run_pipeline(state, repo_root, clarify_intent, run_implementation, evaluate, *, no_assess=False):
     from .state import log_event
+
+    # --- Source Context Preservation ---
+    source_context = _read_source_content(state.source)
+    state.source_context_path(repo_root).write_text(source_context)
+
+    # --- Input Assessment (default on, --no-assess skips) ---
+    interview_context = None
+    if not no_assess:
+        print("\n--- Input Assessment ---")
+        from .interview import assess_and_probe, collect_answers_tty, format_amplification_context
+        try:
+            questions, assess_cost = await assess_and_probe(state.source)
+            state.cost_usd += assess_cost
+
+            if questions:
+                if sys.stdin.isatty():
+                    print(f"  {len(questions)} clarifying question(s):")
+                    qas = collect_answers_tty(questions)
+                    state.interview = qas
+                    interview_context = format_amplification_context(qas)
+                    log_event(state, repo_root, "interview_complete", {"qa_count": len(qas)})
+                else:
+                    # Non-TTY: store unanswered questions for the orchestrator.
+                    # interview_context intentionally stays None here — the
+                    # slash-command orchestrator will present these at the gate,
+                    # collect answers, and write them to the state file before
+                    # resuming. See commands/dark-factory.md Step 3.
+                    state.interview = [InterviewQA(question=q, answer="") for q in questions]
+                    log_event(state, repo_root, "clarifications_recommended",
+                              {"questions": questions})
+            else:
+                print("  Input is clear — no clarification needed")
+                log_event(state, repo_root, "assessment_clear", {})
+        except Exception as e:
+            print(f"  Assessment skipped ({e})")
+            log_event(state, repo_root, "assessment_failed", {"error": str(e)})
 
     # --- Intent Clarification ---
     print("\n--- Intent Clarification ---")
-    intent = await clarify_intent(state.source)
+    intent, intent_cost = await clarify_intent(state.source, interview_context)
     state.intent = intent
+    state.cost_usd += intent_cost
     state.status = RunStatus.INTENT_COMPLETE
     state.save(repo_root)
     log_event(state, repo_root, "intent_complete", {"intent": intent.to_dict()})
 
     print(intent.format_for_display())
+
+    # --- Spec Analysis (opt-in) ---
+    if state.config.analyze_spec:
+        print("\n--- Spec Analysis ---")
+        from .spec_analyzer import analyze_spec
+        analysis = await analyze_spec(intent, state.config.evaluator_model)
+        state.spec_analysis = analysis
+        state.cost_usd += analysis.cost_usd
+        state.save(repo_root)
+        log_event(state, repo_root, "spec_analysis_complete", {"report": analysis.to_dict()})
+        print(analysis.format_for_display())
+        if analysis.has_warnings():
+            print("\n  Warning: Some spec dimensions scored below 7.")
 
     # Human gate after intent
     if Gate.INTENT in state.config.gates:
@@ -400,7 +468,9 @@ def cmd_prepare(args: argparse.Namespace) -> None:
     try:
         work_dir = setup_workspace(state, repo_root)
 
-        prompt = _build_implementation_prompt(state.intent, work_dir)
+        ctx_path = state.source_context_path(repo_root)
+        source_context = ctx_path.read_text() if ctx_path.exists() else ""
+        prompt = _build_implementation_prompt(state.intent, work_dir, source_context)
         prompt_file = state.prompt_path(repo_root)
         prompt_file.write_text(prompt)
 
@@ -624,6 +694,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--gate-eval", action="store_true", help="Pause for approval after evaluation")
     run_p.add_argument("--in-place", action="store_true", help="Work in repo directly (no worktree)")
     run_p.add_argument("--dry-run", action="store_true", help="Plan only, no implementation")
+    run_p.add_argument("--analyze-spec", action="store_true", help="Quality-check the intent before implementation")
+    run_p.add_argument("--no-assess", action="store_true", help="Skip automatic input assessment")
 
     # --- prepare ---
     prep_p = sub.add_parser("prepare", help="Prepare workspace and prompt files for a gated run")
