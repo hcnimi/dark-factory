@@ -75,7 +75,7 @@ def classify_source(raw: str) -> SourceInfo:
     if Path(stripped).is_file():
         return SourceInfo(kind=SourceKind.FILE, raw=stripped, id=Path(stripped).stem)
     if Path(stripped).is_dir():
-        return SourceInfo(kind=SourceKind.DIRECTORY, raw=stripped, id=Path(stripped).name)
+        return SourceInfo(kind=SourceKind.DIRECTORY, raw=stripped, id=Path(stripped).resolve().name)
     # Everything else is inline
     slug = re.sub(r"[^a-z0-9]+", "-", stripped.lower())[:40].strip("-")
     return SourceInfo(kind=SourceKind.INLINE, raw=stripped, id=slug or "inline")
@@ -86,6 +86,11 @@ def read_directory_specs(dir_path: str) -> str:
 
     Raises DarkFactoryError if no .md files are found.
     """
+    # TODO: Add size guard — a directory with many large .md files could
+    # produce an oversized prompt. Consider capping total bytes or file count.
+    # TODO: This function is called multiple times per run (context preservation,
+    # intent prompt, interview prompt). Could be optimized by caching or passing
+    # content through instead of re-reading.
     p = Path(dir_path)
     md_files = sorted(p.rglob("*.md"))
     if not md_files:

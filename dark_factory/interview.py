@@ -32,7 +32,7 @@ def build_interview_prompt(source: SourceInfo) -> str:
             f"Assess this feature specification for ambiguities or missing details:\n\n"
             f"{content}"
         )
-    if source.kind == SourceKind.DIRECTORY:
+    elif source.kind == SourceKind.DIRECTORY:
         content = read_directory_specs(source.raw)
         return (
             f"Assess this feature specification (from multiple files) for ambiguities or missing details:\n\n"
