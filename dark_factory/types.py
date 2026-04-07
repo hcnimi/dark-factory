@@ -18,6 +18,7 @@ from typing import Any
 class SourceKind(str, Enum):
     JIRA = "jira"
     FILE = "file"
+    DIRECTORY = "directory"
     INLINE = "inline"
 
 
@@ -73,9 +74,35 @@ def classify_source(raw: str) -> SourceInfo:
         return SourceInfo(kind=SourceKind.JIRA, raw=stripped, id=stripped)
     if Path(stripped).is_file():
         return SourceInfo(kind=SourceKind.FILE, raw=stripped, id=Path(stripped).stem)
+    if Path(stripped).is_dir():
+        return SourceInfo(kind=SourceKind.DIRECTORY, raw=stripped, id=Path(stripped).resolve().name)
     # Everything else is inline
     slug = re.sub(r"[^a-z0-9]+", "-", stripped.lower())[:40].strip("-")
     return SourceInfo(kind=SourceKind.INLINE, raw=stripped, id=slug or "inline")
+
+
+def read_directory_specs(dir_path: str) -> str:
+    """Read and concatenate all .md files from a directory (recursive).
+
+    Raises DarkFactoryError if no .md files are found.
+    """
+    # TODO: Add size guard — a directory with many large .md files could
+    # produce an oversized prompt. Consider capping total bytes or file count.
+    # TODO: This function is called multiple times per run (context preservation,
+    # intent prompt, interview prompt). Could be optimized by caching or passing
+    # content through instead of re-reading.
+    p = Path(dir_path)
+    md_files = sorted(p.rglob("*.md"))
+    if not md_files:
+        raise DarkFactoryError(
+            f"No .md files found in directory: {dir_path}\n"
+            f"dark-factory expects Markdown spec files in the directory."
+        )
+    parts = []
+    for f in md_files:
+        rel = f.relative_to(p)
+        parts.append(f"<!-- file: {rel} -->\n{f.read_text()}")
+    return "\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from .types import DarkFactoryError, IntentDocument, SourceInfo, SourceKind, extract_sdk_result
+from .types import DarkFactoryError, IntentDocument, SourceInfo, SourceKind, extract_sdk_result, read_directory_specs
 
 INTENT_SYSTEM_PROMPT = """\
 You are an intent clarifier for a software development pipeline. Your job is to \
@@ -41,6 +41,12 @@ def build_intent_prompt(source: SourceInfo, interview_context: str | None = None
         content = Path(source.raw).read_text()
         prompt = (
             f"Produce an intent document based on this spec file:\n\n"
+            f"{content}"
+        )
+    elif source.kind == SourceKind.DIRECTORY:
+        content = read_directory_specs(source.raw)
+        prompt = (
+            f"Produce an intent document based on these spec files:\n\n"
             f"{content}"
         )
     else:

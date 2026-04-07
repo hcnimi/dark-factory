@@ -219,6 +219,9 @@ def _read_source_content(source) -> str:
         path = Path(source.raw)
         if path.exists():
             return path.read_text()
+    if source.kind == SourceKind.DIRECTORY:
+        from .types import read_directory_specs
+        return read_directory_specs(source.raw)
     # TODO: When JIRA support lands, fetch ticket summary + description
     # from the JIRA API so the implementation agent receives full context.
     return source.raw  # INLINE: raw IS the content; JIRA: returns key as placeholder

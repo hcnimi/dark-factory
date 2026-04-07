@@ -26,6 +26,16 @@ class TestBuildInterviewPrompt:
         assert "My Feature" in prompt
         assert "specification" in prompt.lower()
 
+    def test_directory_source(self, tmp_path):
+        spec_dir = tmp_path / "specs"
+        spec_dir.mkdir()
+        (spec_dir / "overview.md").write_text("# My Multi-File Feature\nDetails")
+        source = SourceInfo(SourceKind.DIRECTORY, str(spec_dir), "specs")
+        prompt = build_interview_prompt(source)
+        assert "My Multi-File Feature" in prompt
+        assert "multiple files" in prompt
+        assert "ambiguities" in prompt
+
     def test_jira_source(self):
         source = SourceInfo(SourceKind.JIRA, "DPPT-123", "DPPT-123")
         prompt = build_interview_prompt(source)

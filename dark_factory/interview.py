@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from .types import InterviewQA, SourceInfo, SourceKind, extract_sdk_result
+from .types import InterviewQA, SourceInfo, SourceKind, extract_sdk_result, read_directory_specs
 
 INTERVIEW_SYSTEM_PROMPT = """\
 You analyze feature requests for a software development pipeline.
@@ -30,6 +30,12 @@ def build_interview_prompt(source: SourceInfo) -> str:
         content = Path(source.raw).read_text()
         return (
             f"Assess this feature specification for ambiguities or missing details:\n\n"
+            f"{content}"
+        )
+    elif source.kind == SourceKind.DIRECTORY:
+        content = read_directory_specs(source.raw)
+        return (
+            f"Assess this feature specification (from multiple files) for ambiguities or missing details:\n\n"
             f"{content}"
         )
     if source.kind == SourceKind.JIRA:
