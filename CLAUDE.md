@@ -37,7 +37,7 @@ python3 -m pytest tests/ -x              # Stop on first failure
 
 **Run the pipeline:**
 ```bash
-dark-factory run <jira-key|file|dir|description> [--dry-run] [--gate-intent] [--gate-eval] [--in-place] [--analyze-spec] [--no-assess]
+dark-factory run <file|dir|description> [--dry-run] [--gate-intent] [--gate-eval] [--in-place] [--analyze-spec] [--no-assess] [--implementation-model MODEL]
 dark-factory run --resume <run-id>        # Resume from gate
 ```
 
@@ -63,7 +63,7 @@ The pipeline has three core components that run sequentially:
 
 2. **Implementation** (`infra.py`) — Creates a git worktree, launches an Opus SDK agent with a security-gated `can_use_tool` callback, runs tests, and captures the diff. One fix retry on test failure (budget permitting).
 
-3. **Evaluation** (`evaluator.py`) — Adversarial scoring by a fresh Sonnet agent that never sees the implementation conversation. Scores on Intent Fidelity, Correctness, and Integration (0-10 each) plus per-criterion met/partial/not_met.
+3. **Evaluation** (`evaluator.py`) — Adversarial scoring by a fresh Opus agent that never sees the implementation conversation. Scores on Intent Fidelity, Correctness, and Integration (0-10 each) plus per-criterion met/partial/not_met.
 
 ### Key modules
 

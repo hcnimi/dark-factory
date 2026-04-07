@@ -8,7 +8,7 @@ from dark_factory.interview import (
     parse_interview_response,
     format_amplification_context,
 )
-from dark_factory.types import InterviewQA, SourceInfo, SourceKind
+from dark_factory.types import DarkFactoryError, InterviewQA, SourceInfo, SourceKind
 
 
 class TestBuildInterviewPrompt:
@@ -36,10 +36,10 @@ class TestBuildInterviewPrompt:
         assert "multiple files" in prompt
         assert "ambiguities" in prompt
 
-    def test_jira_source(self):
+    def test_jira_source_raises(self):
         source = SourceInfo(SourceKind.JIRA, "DPPT-123", "DPPT-123")
-        prompt = build_interview_prompt(source)
-        assert "DPPT-123" in prompt
+        with pytest.raises(DarkFactoryError, match="JIRA integration is not yet implemented"):
+            build_interview_prompt(source)
 
 
 class TestParseInterviewResponse:
@@ -60,7 +60,7 @@ class TestParseInterviewResponse:
         assert questions == ["Q1"]
 
     def test_invalid_json_raises(self):
-        with pytest.raises(json.JSONDecodeError):
+        with pytest.raises(DarkFactoryError):
             parse_interview_response("not json at all")
 
     def test_missing_questions_key(self):

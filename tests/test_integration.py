@@ -69,6 +69,7 @@ class TestRunPipeline:
         await _run_pipeline(
             state, str(tmp_path),
             mock_clarify, mock_implement, mock_evaluate,
+            no_assess=True,
         )
 
         assert state.status == RunStatus.COMPLETE
@@ -92,6 +93,7 @@ class TestRunPipeline:
         await _run_pipeline(
             state, str(tmp_path),
             mock_clarify, mock_implement, mock_evaluate,
+            no_assess=True,
         )
 
         # State file should exist and reflect completion
@@ -112,6 +114,7 @@ class TestRunPipeline:
         await _run_pipeline(
             state, str(tmp_path),
             mock_clarify, mock_implement, mock_evaluate,
+            no_assess=True,
         )
 
         events_path = state.events_path(str(tmp_path))
@@ -136,6 +139,7 @@ class TestRunPipeline:
         await _run_pipeline(
             state, str(tmp_path),
             mock_clarify, mock_implement, mock_evaluate,
+            no_assess=True,
         )
 
         eval_path = state.evaluation_path(str(tmp_path))
@@ -159,6 +163,7 @@ class TestRunPipeline:
                 await _run_pipeline(
                     state, str(tmp_path),
                     mock_clarify, mock_implement, mock_evaluate,
+                    no_assess=True,
                 )
 
         # Implementation should NOT have been called
@@ -180,6 +185,7 @@ class TestRunPipeline:
                 await _run_pipeline(
                     state, str(tmp_path),
                     mock_clarify, mock_implement, mock_evaluate,
+                    no_assess=True,
                 )
 
     @pytest.mark.asyncio
@@ -195,6 +201,7 @@ class TestRunPipeline:
         await _run_pipeline(
             state, str(tmp_path),
             mock_clarify, mock_implement, mock_evaluate,
+            no_assess=True,
         )
 
         # 2.0 (existing) + 0.01 (intent) + 0.10 (evaluation)
@@ -213,6 +220,29 @@ class TestRunPipeline:
             await _run_pipeline(
                 state, str(tmp_path),
                 mock_clarify, mock_implement, mock_evaluate,
+                no_assess=True,
             )
 
         mock_evaluate.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_budget_exceeded_skips_evaluation(self, tmp_path):
+        """When cost exceeds budget after implementation, evaluation is skipped."""
+        state = _make_state(tmp_path)
+        state.config.max_cost_usd = 0.005  # Very low budget
+
+        mock_clarify = AsyncMock(return_value=(_make_intent(), 0.01))
+        mock_implement = AsyncMock(return_value="diff content")
+        mock_evaluate = AsyncMock(return_value=_make_report())
+
+        await _run_pipeline(
+            state, str(tmp_path),
+            mock_clarify, mock_implement, mock_evaluate,
+            no_assess=True,
+        )
+
+        assert state.status == RunStatus.COMPLETE
+        mock_evaluate.assert_not_awaited()
+        assert state.evaluation is None
+        # Diff should still be preserved
+        assert state.diff_path(str(tmp_path)).exists()

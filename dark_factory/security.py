@@ -66,6 +66,8 @@ def check_security(
                 return False, f"Bash command blocked: matches '{pattern}'"
 
     # 3. Write boundary enforcement for file-writing tools
+    # Note: This does not cover file writes via Bash (e.g. echo > file, tee, cp).
+    # Bash commands are only checked against blocked_patterns above.
     if tool_name in ("Edit", "Write") and policy.write_boundary is not None:
         file_path = tool_input.get("file_path", "")
         if file_path:

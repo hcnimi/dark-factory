@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
-
-from .types import InterviewQA, SourceInfo, SourceKind, extract_sdk_result, read_source_content
+from .types import DarkFactoryError, InterviewQA, SourceInfo, SourceKind, extract_json_from_response, extract_sdk_result, read_source_content
 
 INTERVIEW_SYSTEM_PROMPT = """\
 You analyze feature requests for a software development pipeline.
@@ -38,10 +36,9 @@ def build_interview_prompt(source: SourceInfo) -> str:
             f"{content}"
         )
     elif source.kind == SourceKind.JIRA:
-        return (
-            f"Assess this Jira ticket for ambiguities or missing details:\n\n"
-            f"Ticket: {content}\n"
-            f"(Ticket details would be fetched from Jira API)"
+        raise DarkFactoryError(
+            "JIRA integration is not yet implemented. "
+            "Provide a file path or inline description instead."
         )
     # INLINE
     return (
@@ -51,14 +48,8 @@ def build_interview_prompt(source: SourceInfo) -> str:
 
 
 def parse_interview_response(text: str) -> list[str]:
-    """Parse {"questions": [...]} JSON. Strip code fences. Returns list (may be empty)."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        lines = [line for line in lines if not line.strip().startswith("```")]
-        cleaned = "\n".join(lines).strip()
-
-    data = json.loads(cleaned)
+    """Parse {"questions": [...]} JSON. Returns list (may be empty)."""
+    data = extract_json_from_response(text)
     return data.get("questions", [])
 
 

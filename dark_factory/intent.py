@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sys
 
-from .types import DarkFactoryError, IntentDocument, SourceInfo, SourceKind, extract_sdk_result, read_source_content
+from .types import DarkFactoryError, IntentDocument, SourceInfo, SourceKind, extract_json_from_response, extract_sdk_result, read_source_content
 
 # Markers that indicate a structured spec (vs. prose or vague description)
 _STRUCTURED_MARKERS = [
@@ -136,10 +136,10 @@ async def extract_intent_from_spec(
 
         return parse_intent_response(full_text), cost
 
-    except Exception as e:
-        # Intentional broad catch: extraction is best-effort with fallback to
-        # condensation. Covers SDK errors, JSON parse failures, missing fields.
-        # BaseException subclasses (KeyboardInterrupt, SystemExit) are NOT caught.
+    except (DarkFactoryError, json.JSONDecodeError, KeyError, ValueError) as e:
+        # Extraction is best-effort with fallback to condensation.
+        # Covers DarkFactoryError (SDK/parse), JSONDecodeError, missing fields (KeyError),
+        # and invalid values (ValueError). Unexpected errors propagate.
         print(f"  Extraction failed ({e}), falling back to condensation", file=sys.stderr)
         return await _clarify_intent_condensation(source, interview_context)
 
@@ -160,10 +160,9 @@ def build_intent_prompt(source: SourceInfo, interview_context: str | None = None
             f"{content}"
         )
     else:
-        # Jira — not in MVP, but stub the prompt
-        prompt = (
-            f"Produce an intent document for Jira ticket {source.raw}.\n"
-            f"(Ticket details would be fetched from Jira API)"
+        raise DarkFactoryError(
+            "JIRA integration is not yet implemented. "
+            "Provide a file path or inline description instead."
         )
 
     if interview_context:
@@ -179,15 +178,7 @@ def build_intent_prompt(source: SourceInfo, interview_context: str | None = None
 
 def parse_intent_response(text: str) -> IntentDocument:
     """Parse the model's JSON response into an IntentDocument."""
-    # Strip markdown code fences if present
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        # Remove first and last fence lines
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        cleaned = "\n".join(lines).strip()
-
-    data = json.loads(cleaned)
+    data = extract_json_from_response(text)
     return IntentDocument(
         title=data["title"],
         summary=data["summary"],

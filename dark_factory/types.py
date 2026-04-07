@@ -113,9 +113,9 @@ def read_source_content(source: "SourceInfo") -> str:
     """
     if source.kind == SourceKind.FILE:
         path = Path(source.raw)
-        if path.exists():
-            return path.read_text()
-        return source.raw
+        if not path.exists():
+            raise DarkFactoryError(f"Source file not found: {source.raw}")
+        return path.read_text()
     if source.kind == SourceKind.DIRECTORY:
         return read_directory_specs(source.raw)
     # INLINE: raw IS the content; JIRA: returns key as placeholder
@@ -265,7 +265,7 @@ class EvaluationReport:
         lines.append("")
         lines.append("### Acceptance Criteria")
         for c in self.criteria:
-            icon = {"met": "+", "partial": "~", "not_met": "-"}[c.status.value]
+            icon = {"met": "+", "partial": "~", "not_met": "-"}.get(c.status.value, "?")
             lines.append(f"  [{icon}] {c.criterion}: {c.evidence}")
         lines.append("")
         lines.append(f"Model: {self.model_used} | Cost: ${self.cost_usd:.4f}")
@@ -338,7 +338,8 @@ class SecurityPolicy:
 @dataclass
 class RunConfig:
     max_cost_usd: float = 10.0
-    evaluator_model: str = "claude-sonnet-4-20250514"
+    evaluator_model: str = "claude-opus-4-6"
+    implementation_model: str = "claude-opus-4-20250514"
     gates: list[Gate] = field(default_factory=list)
     in_place: bool = False
     dry_run: bool = False
@@ -348,6 +349,7 @@ class RunConfig:
         return {
             "max_cost_usd": self.max_cost_usd,
             "evaluator_model": self.evaluator_model,
+            "implementation_model": self.implementation_model,
             "gates": [g.value for g in self.gates],
             "in_place": self.in_place,
             "dry_run": self.dry_run,
@@ -358,7 +360,8 @@ class RunConfig:
     def from_dict(cls, d: dict[str, Any]) -> RunConfig:
         return cls(
             max_cost_usd=d.get("max_cost_usd", 10.0),
-            evaluator_model=d.get("evaluator_model", "claude-sonnet-4-20250514"),
+            evaluator_model=d.get("evaluator_model", "claude-opus-4-6"),
+            implementation_model=d.get("implementation_model", "claude-opus-4-20250514"),
             gates=[Gate(g) for g in d.get("gates", [])],
             in_place=d.get("in_place", False),
             dry_run=d.get("dry_run", False),
@@ -512,3 +515,44 @@ def extract_sdk_result(messages: list) -> tuple[str, float]:
         text = "\n".join(parts)
 
     return text, cost
+
+
+def extract_json_from_response(text: str) -> Any:
+    """Extract and parse a JSON object from an LLM response.
+
+    Handles common quirks: bare JSON, code-fenced JSON, prose before/after
+    the JSON object. Raises DarkFactoryError on parse failure.
+    """
+    cleaned = text.strip()
+    if not cleaned:
+        raise DarkFactoryError("Empty response from model (expected JSON)")
+
+    # Fast path: response is already clean JSON
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Code fence path: extract content from ```json ... ``` blocks
+    fence_match = re.search(r"```(?:json)?\s*\n(.*?)\n\s*```", cleaned, re.DOTALL)
+    if fence_match:
+        try:
+            return json.loads(fence_match.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+
+    # Scan path: find each '{' and try to parse from there.
+    # Use raw_decode to handle trailing text after the JSON object.
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(cleaned):
+        if ch == "{":
+            try:
+                obj, _ = decoder.raw_decode(cleaned, i)
+                return obj
+            except json.JSONDecodeError:
+                continue
+
+    raise DarkFactoryError(
+        f"Could not parse JSON from model response. "
+        f"First 200 chars: {cleaned[:200]}"
+    )
