@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from .types import InterviewQA, SourceInfo, SourceKind, extract_sdk_result, read_directory_specs
+from .types import InterviewQA, SourceInfo, SourceKind, extract_sdk_result, read_source_content
 
 INTERVIEW_SYSTEM_PROMPT = """\
 You analyze feature requests for a software development pipeline.
@@ -23,31 +23,30 @@ what should happen, not how to build it."""
 def build_interview_prompt(source: SourceInfo) -> str:
     """Build prompt with raw input for assessment.
 
-    For FILE sources, reads file content. For INLINE, uses raw text.
+    For FILE/DIRECTORY sources, reads file content. For INLINE, uses raw text.
     """
+    content = read_source_content(source)
+
     if source.kind == SourceKind.FILE:
-        from pathlib import Path
-        content = Path(source.raw).read_text()
         return (
             f"Assess this feature specification for ambiguities or missing details:\n\n"
             f"{content}"
         )
     elif source.kind == SourceKind.DIRECTORY:
-        content = read_directory_specs(source.raw)
         return (
             f"Assess this feature specification (from multiple files) for ambiguities or missing details:\n\n"
             f"{content}"
         )
-    if source.kind == SourceKind.JIRA:
+    elif source.kind == SourceKind.JIRA:
         return (
             f"Assess this Jira ticket for ambiguities or missing details:\n\n"
-            f"Ticket: {source.raw}\n"
+            f"Ticket: {content}\n"
             f"(Ticket details would be fetched from Jira API)"
         )
     # INLINE
     return (
         f"Assess this feature request for ambiguities or missing details:\n\n"
-        f"{source.raw}"
+        f"{content}"
     )
 
 

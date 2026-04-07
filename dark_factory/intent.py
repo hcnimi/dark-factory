@@ -103,6 +103,7 @@ def build_extraction_prompt(content: str, interview_context: str | None = None) 
 async def extract_intent_from_spec(
     source: SourceInfo,
     interview_context: str | None = None,
+    content: str | None = None,
 ) -> tuple[IntentDocument, float]:
     """Extract intent from a structured spec, preserving all detail.
 
@@ -112,7 +113,8 @@ async def extract_intent_from_spec(
     """
     from claude_code_sdk import query, ClaudeCodeOptions, Message
 
-    content = read_source_content(source)
+    if content is None:
+        content = read_source_content(source)
     prompt = build_extraction_prompt(content, interview_context)
 
     try:
@@ -135,7 +137,9 @@ async def extract_intent_from_spec(
         return parse_intent_response(full_text), cost
 
     except Exception as e:
-        # Fall back to condensation on any failure
+        # Intentional broad catch: extraction is best-effort with fallback to
+        # condensation. Covers SDK errors, JSON parse failures, missing fields.
+        # BaseException subclasses (KeyboardInterrupt, SystemExit) are NOT caught.
         print(f"  Extraction failed ({e}), falling back to condensation", file=sys.stderr)
         return await _clarify_intent_condensation(source, interview_context)
 
@@ -208,7 +212,7 @@ async def clarify_intent(
         content = read_source_content(source)
         if is_structured_spec(content):
             print("  Using extraction mode (structured spec detected)", file=sys.stderr)
-            return await extract_intent_from_spec(source, interview_context)
+            return await extract_intent_from_spec(source, interview_context, content=content)
 
     return await _clarify_intent_condensation(source, interview_context)
 

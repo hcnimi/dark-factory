@@ -2,16 +2,19 @@
 
 import json
 import pytest
+from unittest.mock import AsyncMock, patch
 
 from dark_factory.intent import (
     build_intent_prompt,
     build_extraction_prompt,
+    clarify_intent,
+    extract_intent_from_spec,
     is_structured_spec,
     parse_intent_response,
     INTENT_SYSTEM_PROMPT,
     EXTRACT_INTENT_SYSTEM_PROMPT,
 )
-from dark_factory.types import SourceInfo, SourceKind
+from dark_factory.types import IntentDocument, SourceInfo, SourceKind
 
 
 class TestBuildIntentPrompt:
@@ -150,3 +153,95 @@ class TestBuildExtractionPrompt:
     def test_extraction_system_prompt_preserves_detail(self):
         assert "Do NOT summarize or condense" in EXTRACT_INTENT_SYSTEM_PROMPT
         assert "50+" in EXTRACT_INTENT_SYSTEM_PROMPT
+
+
+def _make_intent(**kwargs):
+    defaults = {
+        "title": "Auth Feature",
+        "summary": "Add authentication",
+        "acceptance_criteria": ["AC1", "AC2"],
+    }
+    defaults.update(kwargs)
+    return IntentDocument(**defaults)
+
+
+def _structured_content():
+    return (
+        "## ADDED Requirements\n\n"
+        "### Requirement: Login\n"
+        "#### Scenario: Valid credentials\n"
+        "- **GIVEN** a registered user\n"
+        "- **WHEN** they submit valid credentials\n"
+        "- **THEN** they receive a 200 response\n"
+    )
+
+
+class TestClarifyIntentRouting:
+    @pytest.mark.asyncio
+    async def test_structured_spec_routes_to_extraction(self, tmp_path):
+        spec = tmp_path / "spec.md"
+        spec.write_text(_structured_content())
+        source = SourceInfo(SourceKind.FILE, str(spec), "spec")
+
+        intent = _make_intent()
+        with patch(
+            "dark_factory.intent.extract_intent_from_spec",
+            new_callable=AsyncMock,
+            return_value=(intent, 0.02),
+        ) as mock_extract:
+            result, cost = await clarify_intent(source)
+            mock_extract.assert_awaited_once()
+            assert result.title == "Auth Feature"
+            assert cost == 0.02
+
+    @pytest.mark.asyncio
+    async def test_directory_routes_to_extraction(self, tmp_path):
+        spec_dir = tmp_path / "specs"
+        spec_dir.mkdir()
+        (spec_dir / "spec.md").write_text(_structured_content())
+        source = SourceInfo(SourceKind.DIRECTORY, str(spec_dir), "specs")
+
+        intent = _make_intent()
+        with patch(
+            "dark_factory.intent.extract_intent_from_spec",
+            new_callable=AsyncMock,
+            return_value=(intent, 0.02),
+        ) as mock_extract:
+            result, cost = await clarify_intent(source)
+            mock_extract.assert_awaited_once()
+            assert result.title == "Auth Feature"
+
+    @pytest.mark.asyncio
+    async def test_prose_routes_to_condensation(self):
+        source = SourceInfo(SourceKind.INLINE, "add dark mode toggle", "dark-mode")
+
+        intent = _make_intent(title="Dark Mode")
+        with patch(
+            "dark_factory.intent._clarify_intent_condensation",
+            new_callable=AsyncMock,
+            return_value=(intent, 0.01),
+        ) as mock_condense:
+            result, cost = await clarify_intent(source)
+            mock_condense.assert_awaited_once()
+            assert result.title == "Dark Mode"
+            assert cost == 0.01
+
+
+class TestExtractIntentFallback:
+    @pytest.mark.asyncio
+    async def test_extraction_failure_falls_back(self, tmp_path):
+        spec = tmp_path / "spec.md"
+        spec.write_text(_structured_content())
+        source = SourceInfo(SourceKind.FILE, str(spec), "spec")
+
+        intent = _make_intent()
+        with patch("claude_code_sdk.query", side_effect=RuntimeError("SDK error")), \
+             patch(
+                 "dark_factory.intent._clarify_intent_condensation",
+                 new_callable=AsyncMock,
+                 return_value=(intent, 0.03),
+             ) as mock_condense:
+            result, cost = await extract_intent_from_spec(source)
+            mock_condense.assert_awaited_once()
+            assert result.title == "Auth Feature"
+            assert cost == 0.03

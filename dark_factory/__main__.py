@@ -213,16 +213,11 @@ def cmd_run(args: argparse.Namespace) -> None:
         sys.exit(130)
 
 
-def _read_source_content(source) -> str:
-    """Read the full source content for context preservation."""
-    return read_source_content(source)
-
-
 async def _run_pipeline(state, repo_root, clarify_intent, run_implementation, evaluate, *, no_assess=False):
     from .state import log_event
 
     # --- Source Context Preservation ---
-    source_context = _read_source_content(state.source)
+    source_context = read_source_content(state.source)
     state.source_context_path(repo_root).write_text(source_context)
 
     # --- Input Assessment (default on, --no-assess skips) ---
