@@ -37,7 +37,7 @@ python3 -m pytest tests/ -x              # Stop on first failure
 
 **Run the pipeline:**
 ```bash
-dark-factory run <jira-key|file|dir|description> [--dry-run] [--gate-intent] [--gate-eval] [--in-place] [--analyze-spec] [--no-assess]
+dark-factory run <file|dir|description> [--dry-run] [--gate-intent] [--gate-eval] [--in-place] [--analyze-spec] [--no-assess] [--implementation-model MODEL]
 dark-factory run --resume <run-id>        # Resume from gate
 ```
 

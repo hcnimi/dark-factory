@@ -123,5 +123,27 @@ class TestParseEvaluationResponse:
 
     def test_missing_scores_raises(self):
         response = json.dumps({"criteria": []})
-        with pytest.raises(KeyError):
+        with pytest.raises(DarkFactoryError, match="Invalid evaluation response"):
+            parse_evaluation_response(response)
+
+    def test_invalid_score_value_raises(self):
+        response = json.dumps({
+            "scores": [
+                {"dimension": "Intent Fidelity", "score": "not-a-number", "justification": "x"},
+            ],
+            "criteria": [],
+        })
+        with pytest.raises(DarkFactoryError, match="Invalid evaluation response"):
+            parse_evaluation_response(response)
+
+    def test_invalid_criterion_status_raises(self):
+        response = json.dumps({
+            "scores": [
+                {"dimension": "Intent Fidelity", "score": 9, "justification": "x"},
+            ],
+            "criteria": [
+                {"criterion": "AC1", "status": "fulfilled", "evidence": "x"},
+            ],
+        })
+        with pytest.raises(DarkFactoryError, match="Invalid evaluation response"):
             parse_evaluation_response(response)

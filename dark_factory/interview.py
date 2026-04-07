@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .types import InterviewQA, SourceInfo, SourceKind, extract_json_from_response, extract_sdk_result, read_source_content
+from .types import DarkFactoryError, InterviewQA, SourceInfo, SourceKind, extract_json_from_response, extract_sdk_result, read_source_content
 
 INTERVIEW_SYSTEM_PROMPT = """\
 You analyze feature requests for a software development pipeline.
@@ -36,10 +36,9 @@ def build_interview_prompt(source: SourceInfo) -> str:
             f"{content}"
         )
     elif source.kind == SourceKind.JIRA:
-        return (
-            f"Assess this Jira ticket for ambiguities or missing details:\n\n"
-            f"Ticket: {content}\n"
-            f"(Ticket details would be fetched from Jira API)"
+        raise DarkFactoryError(
+            "JIRA integration is not yet implemented. "
+            "Provide a file path or inline description instead."
         )
     # INLINE
     return (

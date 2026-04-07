@@ -40,5 +40,8 @@ def load_events(events_path: Path) -> list[dict[str, Any]]:
     for line in events_path.read_text().splitlines():
         line = line.strip()
         if line:
-            events.append(json.loads(line))
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue  # skip corrupt lines
     return events

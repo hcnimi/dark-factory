@@ -129,9 +129,10 @@ class TestReadSourceContent:
         assert "# Feature" in content
         assert "Details" in content
 
-    def test_file_missing_returns_raw(self):
+    def test_file_missing_raises(self):
         source = SourceInfo(SourceKind.FILE, "/nonexistent/file.md", "file")
-        assert read_source_content(source) == "/nonexistent/file.md"
+        with pytest.raises(DarkFactoryError, match="Source file not found"):
+            read_source_content(source)
 
     def test_directory_reads_specs(self, tmp_path):
         spec_dir = tmp_path / "specs"

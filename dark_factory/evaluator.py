@@ -117,23 +117,26 @@ def parse_evaluation_response(text: str) -> tuple[list[DimensionScore], list[Cri
     """Parse the evaluator's JSON response."""
     data = extract_json_from_response(text)
 
-    scores = [
-        DimensionScore(
-            dimension=s["dimension"],
-            score=int(s["score"]),
-            justification=s["justification"],
-        )
-        for s in data["scores"]
-    ]
+    try:
+        scores = [
+            DimensionScore(
+                dimension=s["dimension"],
+                score=int(s["score"]),
+                justification=s["justification"],
+            )
+            for s in data["scores"]
+        ]
 
-    criteria = [
-        CriterionAssessment(
-            criterion=c["criterion"],
-            status=CriterionStatus(c["status"]),
-            evidence=c["evidence"],
-        )
-        for c in data.get("criteria", [])
-    ]
+        criteria = [
+            CriterionAssessment(
+                criterion=c["criterion"],
+                status=CriterionStatus(c["status"]),
+                evidence=c["evidence"],
+            )
+            for c in data.get("criteria", [])
+        ]
+    except (KeyError, ValueError, TypeError) as e:
+        raise DarkFactoryError(f"Invalid evaluation response structure: {e}") from e
 
     return scores, criteria
 

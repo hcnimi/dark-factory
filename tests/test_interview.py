@@ -36,10 +36,10 @@ class TestBuildInterviewPrompt:
         assert "multiple files" in prompt
         assert "ambiguities" in prompt
 
-    def test_jira_source(self):
+    def test_jira_source_raises(self):
         source = SourceInfo(SourceKind.JIRA, "DPPT-123", "DPPT-123")
-        prompt = build_interview_prompt(source)
-        assert "DPPT-123" in prompt
+        with pytest.raises(DarkFactoryError, match="JIRA integration is not yet implemented"):
+            build_interview_prompt(source)
 
 
 class TestParseInterviewResponse:

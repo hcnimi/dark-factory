@@ -6,6 +6,7 @@ import atexit
 import os
 import shlex
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -75,8 +76,8 @@ def _cleanup_all_worktrees() -> None:
     for worktree_path, _branch, repo_root in _active_worktrees:
         try:
             _cleanup_worktree_only(worktree_path, repo_root)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"warning: failed to cleanup worktree {worktree_path}: {e}", file=sys.stderr)
 
 
 atexit.register(_cleanup_all_worktrees)
@@ -210,8 +211,9 @@ async def _launch_agent(
     work_dir: str,
     policy: SecurityPolicy,
     max_turns: int = 30,
+    model: str = "claude-opus-4-20250514",
 ) -> tuple[str, float]:
-    """Launch an Opus SDK agent. Returns (output_text, cost_usd)."""
+    """Launch an SDK agent. Returns (output_text, cost_usd)."""
     from claude_code_sdk import query, ClaudeCodeOptions, Message
 
     can_use_tool = build_permission_callback(policy)
@@ -223,7 +225,7 @@ async def _launch_agent(
             prompt=_prompt_as_stream(prompt),
             options=ClaudeCodeOptions(
                 system_prompt=IMPLEMENTATION_SYSTEM_PROMPT,
-                model="claude-opus-4-20250514",
+                model=model,
                 max_turns=max_turns,
                 cwd=work_dir,
                 can_use_tool=can_use_tool,
@@ -244,6 +246,7 @@ async def _launch_fix_agent(
     test_output: str,
     work_dir: str,
     policy: SecurityPolicy,
+    model: str = "claude-opus-4-20250514",
 ) -> tuple[str, float]:
     """Launch a fix agent to address test failures. Returns (output, cost)."""
     prompt = (
@@ -252,7 +255,7 @@ async def _launch_fix_agent(
         "Fix the failing tests, then run the test suite to verify your fixes work. "
         "Commit your fixes."
     )
-    return await _launch_agent(prompt, work_dir, policy, max_turns=15)
+    return await _launch_agent(prompt, work_dir, policy, max_turns=15, model=model)
 
 
 # ---------------------------------------------------------------------------
@@ -282,10 +285,11 @@ async def run_implementation(
     source_context = ctx_path.read_text() if ctx_path.exists() else ""
 
     # Launch implementation agent
-    print(f"  Launching Opus agent in {work_dir}")
+    impl_model = state.config.implementation_model
+    print(f"  Launching agent ({impl_model}) in {work_dir}")
     start = time.time()
     prompt = _build_implementation_prompt(intent, work_dir, source_context)
-    output, cost = await _launch_agent(prompt, work_dir, policy)
+    output, cost = await _launch_agent(prompt, work_dir, policy, model=impl_model)
     elapsed = time.time() - start
     state.cost_usd += cost
     print(f"  Agent complete ({elapsed:.0f}s, ${cost:.4f})")
@@ -303,7 +307,7 @@ async def run_implementation(
 
         if not passed and not budget_exceeded:
             print("  Tests failed — launching fix agent (1 retry)")
-            fix_output, fix_cost = await _launch_fix_agent(test_output, work_dir, policy)
+            fix_output, fix_cost = await _launch_fix_agent(test_output, work_dir, policy, model=impl_model)
             state.cost_usd += fix_cost
 
             # Re-run tests

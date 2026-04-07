@@ -182,6 +182,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     config = RunConfig(
         max_cost_usd=args.max_cost,
         evaluator_model=args.evaluator_model,
+        implementation_model=args.implementation_model,
         gates=gates,
         in_place=args.in_place,
         dry_run=args.dry_run,
@@ -248,7 +249,7 @@ async def _run_pipeline(state, repo_root, clarify_intent, run_implementation, ev
             else:
                 print("  Input is clear — no clarification needed")
                 log_event(state, repo_root, "assessment_clear", {})
-        except Exception as e:
+        except (DarkFactoryError, OSError) as e:
             print(f"  Assessment skipped ({e})")
             log_event(state, repo_root, "assessment_failed", {"error": str(e)})
 
@@ -297,17 +298,35 @@ async def _run_pipeline(state, repo_root, clarify_intent, run_implementation, ev
         print(json.dumps(state.to_dict(), indent=2))
         return
 
+    await _implement_eval_complete(state, repo_root, run_implementation, evaluate, source_context, log_event)
+
+
+async def _implement_eval_complete(state, repo_root, run_implementation, evaluate, source_context, log_event):
+    """Shared flow: implementation -> evaluation -> eval gate -> complete."""
     # --- Implementation ---
     print("\n--- Implementation ---")
     state.status = RunStatus.IMPLEMENTING
     state.save(repo_root)
     log_event(state, repo_root, "implementation_started", {})
 
+    intent = state.intent
     diff = await run_implementation(state, intent, repo_root)
     state.diff = diff
     state.status = RunStatus.VERIFYING
     state.save(repo_root)
     log_event(state, repo_root, "implementation_complete", {"diff_lines": len(diff.splitlines())})
+
+    # Budget check: skip evaluation if limit reached (diff is preserved)
+    if state.cost_usd >= state.config.max_cost_usd:
+        print(f"\n  Budget limit reached (${state.cost_usd:.2f} >= ${state.config.max_cost_usd:.2f})")
+        print("  Skipping evaluation. Diff is preserved for manual review.")
+        state.diff_path(repo_root).write_text(diff)
+        state.status = RunStatus.COMPLETE
+        state.save(repo_root)
+        log_event(state, repo_root, "budget_exceeded", {"cost_usd": state.cost_usd})
+        print(f"\nRun {state.run_id} complete (budget exceeded) | cost: ${state.cost_usd:.4f}")
+        print(json.dumps(state.to_dict(), indent=2))
+        return
 
     # --- Evaluation ---
     print("\n--- Evaluation ---")
@@ -374,46 +393,8 @@ async def _resume_pipeline(state, repo_root, run_implementation, evaluate):
             print(json.dumps(state.to_dict(), indent=2))
             return
 
-        # --- Implementation ---
-        print("\n--- Implementation ---")
-        state.status = RunStatus.IMPLEMENTING
-        state.save(repo_root)
-        log_event(state, repo_root, "implementation_started", {})
-
-        diff = await run_implementation(state, state.intent, repo_root)
-        state.diff = diff
-        state.status = RunStatus.VERIFYING
-        state.save(repo_root)
-        log_event(state, repo_root, "implementation_complete", {"diff_lines": len(diff.splitlines())})
-
-        # --- Evaluation ---
-        print("\n--- Evaluation ---")
-        state.status = RunStatus.EVALUATING
-        state.save(repo_root)
-
-        report = await evaluate(state.intent, diff, state.config.evaluator_model, source_context=source_context)
-        state.evaluation = report
-        state.cost_usd += report.cost_usd
-        state.save(repo_root)
-        log_event(state, repo_root, "evaluation_complete", {"report": report.to_dict()})
-
-        eval_path = state.evaluation_path(repo_root)
-        eval_path.write_text(json.dumps(report.to_dict(), indent=2) + "\n")
-
-        print(report.format_for_display())
-
-        # Eval gate (if configured, still fires on resume from intent gate)
-        if Gate.EVAL in state.config.gates:
-            state.diff_path(repo_root).write_text(state.diff)
-            state.status = RunStatus.GATED_EVAL
-            state.save(repo_root)
-            log_event(state, repo_root, "gated_eval", {})
-            if report.is_borderline():
-                prompt = "\nBorderline scores detected. Options: [a]ccept / [r]e-run / [q]uit\nChoice: "
-            else:
-                prompt = "\nOptions: [a]ccept / [q]uit\nChoice: "
-            _handle_gate(state, repo_root, "eval", prompt,
-                         "aborted by user after evaluation")
+        await _implement_eval_complete(state, repo_root, run_implementation, evaluate, source_context, log_event)
+        return
 
     elif state.status == RunStatus.GATED_EVAL:
         # Load diff from file (not serialized in state JSON)
@@ -712,6 +693,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--resume", metavar="RUN_ID", help="Resume a gated run by its run ID")
     run_p.add_argument("--max-cost", type=float, default=10.0, help="Max cost in USD (default: 10)")
     run_p.add_argument("--evaluator-model", default="claude-opus-4-6", help="Model for evaluation")
+    run_p.add_argument("--implementation-model", default="claude-opus-4-20250514", help="Model for implementation agent")
     run_p.add_argument("--gate-intent", action="store_true", help="Pause for approval after intent")
     run_p.add_argument("--gate-eval", action="store_true", help="Pause for approval after evaluation")
     run_p.add_argument("--in-place", action="store_true", help="Work in repo directly (no worktree)")

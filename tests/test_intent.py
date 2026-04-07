@@ -32,10 +32,10 @@ class TestBuildIntentPrompt:
         assert "My Feature" in prompt
         assert "spec file" in prompt
 
-    def test_jira_source(self):
+    def test_jira_source_raises(self):
         source = SourceInfo(SourceKind.JIRA, "DPPT-123", "DPPT-123")
-        prompt = build_intent_prompt(source)
-        assert "DPPT-123" in prompt
+        with pytest.raises(DarkFactoryError, match="JIRA integration is not yet implemented"):
+            build_intent_prompt(source)
 
     def test_directory_source(self, tmp_path):
         spec_dir = tmp_path / "specs"
@@ -235,7 +235,7 @@ class TestExtractIntentFallback:
         source = SourceInfo(SourceKind.FILE, str(spec), "spec")
 
         intent = _make_intent()
-        with patch("claude_code_sdk.query", side_effect=RuntimeError("SDK error")), \
+        with patch("claude_code_sdk.query", side_effect=DarkFactoryError("SDK error")), \
              patch(
                  "dark_factory.intent._clarify_intent_condensation",
                  new_callable=AsyncMock,

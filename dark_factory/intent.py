@@ -7,6 +7,7 @@ uses condensation mode that synthesizes structure from scratch.
 
 from __future__ import annotations
 
+import json
 import sys
 
 from .types import DarkFactoryError, IntentDocument, SourceInfo, SourceKind, extract_json_from_response, extract_sdk_result, read_source_content
@@ -135,10 +136,10 @@ async def extract_intent_from_spec(
 
         return parse_intent_response(full_text), cost
 
-    except Exception as e:
-        # Intentional broad catch: extraction is best-effort with fallback to
-        # condensation. Covers SDK errors, JSON parse failures, missing fields.
-        # BaseException subclasses (KeyboardInterrupt, SystemExit) are NOT caught.
+    except (DarkFactoryError, json.JSONDecodeError, KeyError, ValueError) as e:
+        # Extraction is best-effort with fallback to condensation.
+        # Covers DarkFactoryError (SDK/parse), JSONDecodeError, missing fields (KeyError),
+        # and invalid values (ValueError). Unexpected errors propagate.
         print(f"  Extraction failed ({e}), falling back to condensation", file=sys.stderr)
         return await _clarify_intent_condensation(source, interview_context)
 
@@ -159,10 +160,9 @@ def build_intent_prompt(source: SourceInfo, interview_context: str | None = None
             f"{content}"
         )
     else:
-        # Jira — not in MVP, but stub the prompt
-        prompt = (
-            f"Produce an intent document for Jira ticket {source.raw}.\n"
-            f"(Ticket details would be fetched from Jira API)"
+        raise DarkFactoryError(
+            "JIRA integration is not yet implemented. "
+            "Provide a file path or inline description instead."
         )
 
     if interview_context:
