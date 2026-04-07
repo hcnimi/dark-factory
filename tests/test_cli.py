@@ -103,6 +103,22 @@ class TestBuildParser:
         assert args.input is None
         assert args.resume is None
 
+    def test_run_with_analyze_spec(self):
+        parser = build_parser()
+        args = parser.parse_args(["run", "add dark mode", "--analyze-spec"])
+        assert args.analyze_spec is True
+
+    def test_run_with_no_assess(self):
+        parser = build_parser()
+        args = parser.parse_args(["run", "add dark mode", "--no-assess"])
+        assert args.no_assess is True
+
+    def test_run_defaults_no_analyze_no_assess(self):
+        parser = build_parser()
+        args = parser.parse_args(["run", "add dark mode"])
+        assert args.analyze_spec is False
+        assert args.no_assess is False
+
 
 class TestHandleGate:
     def _make_state(self, tmp_path, status=RunStatus.GATED_INTENT):

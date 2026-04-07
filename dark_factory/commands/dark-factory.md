@@ -19,6 +19,8 @@ Delegates orchestration to the `dark_factory` Python package in phased steps. Ea
 | `--in-place` | Work in repo directly instead of a git worktree |
 | `--max-cost N` | Cap total cost at N USD (default: 10) |
 | `--evaluator-model M` | Model for evaluation (default: claude-sonnet-4-20250514) |
+| `--analyze-spec` | Quality-check the intent before implementation |
+| `--no-assess` | Skip automatic input assessment |
 
 ## Execution
 
@@ -41,6 +43,10 @@ Save the full output and note the exit code.
 ### Step 3: Present intent to user
 
 Read the state file (from the gate JSON `state_file` field) to get the `.intent` field. Display the title, summary, and acceptance criteria.
+
+If the gate JSON contains a `clarifications` array, present each question to the user and ask if they want to answer them to improve the implementation. If yes: collect answers, write them to the state file's `.interview` field, and note the answers when approving.
+
+If `.spec_analysis` is present in state, display the scores and suggestions.
 
 If the user included `--dry-run`: present the intent and **stop** (do not proceed to implementation).
 
