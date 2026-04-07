@@ -11,6 +11,7 @@ from dark_factory.types import (
     SourceInfo,
     classify_source,
     read_directory_specs,
+    read_source_content,
     RunStatus,
     Gate,
     CriterionStatus,
@@ -112,6 +113,36 @@ class TestReadDirectorySpecs:
         (tmp_path / "a.md").write_text("first")
         content = read_directory_specs(str(tmp_path))
         assert content.index("first") < content.index("last")
+
+
+class TestReadSourceContent:
+    def test_inline_returns_raw(self):
+        source = SourceInfo(SourceKind.INLINE, "add dark mode", "add-dark-mode")
+        assert read_source_content(source) == "add dark mode"
+
+    def test_file_reads_content(self, tmp_path):
+        spec = tmp_path / "spec.md"
+        spec.write_text("# Feature\nDetails")
+        source = SourceInfo(SourceKind.FILE, str(spec), "spec")
+        content = read_source_content(source)
+        assert "# Feature" in content
+        assert "Details" in content
+
+    def test_file_missing_returns_raw(self):
+        source = SourceInfo(SourceKind.FILE, "/nonexistent/file.md", "file")
+        assert read_source_content(source) == "/nonexistent/file.md"
+
+    def test_directory_reads_specs(self, tmp_path):
+        spec_dir = tmp_path / "specs"
+        spec_dir.mkdir()
+        (spec_dir / "a.md").write_text("# Spec A")
+        source = SourceInfo(SourceKind.DIRECTORY, str(spec_dir), "specs")
+        content = read_source_content(source)
+        assert "# Spec A" in content
+
+    def test_jira_returns_raw(self):
+        source = SourceInfo(SourceKind.JIRA, "PROJ-123", "PROJ-123")
+        assert read_source_content(source) == "PROJ-123"
 
 
 class TestIntentDocument:

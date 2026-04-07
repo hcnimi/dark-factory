@@ -62,27 +62,47 @@ For each acceptance criterion, mark as:
 - "partial": partially implemented
 - "not_met": not implemented or missing
 
+If an "Original Specification" section is provided, use it as the primary reference \
+for understanding requirements. The acceptance criteria are derived from this \
+specification — evaluate against the full detail of the original spec, not just the \
+summarized criteria.
+
 Be specific. Cite line numbers, function names, and code snippets from the diff.
 """
 
 
-def build_evaluation_prompt(intent: IntentDocument, diff: str) -> str:
-    """Build the prompt for evaluation."""
+def build_evaluation_prompt(intent: IntentDocument, diff: str, source_context: str = "") -> str:
+    """Build the prompt for evaluation.
+
+    When source_context is provided, it is included as the original specification
+    so the evaluator can assess against the full detail, not just the summarized
+    acceptance criteria.
+    """
     ac_text = "\n".join(f"  {i}. {ac}" for i, ac in enumerate(intent.acceptance_criteria, 1))
 
-    # Truncate very large diffs to avoid token limits
+    # Dynamic token budget: diff gets priority, source_context fills remainder
     max_diff_chars = 50_000
+    max_context_chars = 30_000
     if len(diff) > max_diff_chars:
         diff = diff[:max_diff_chars] + "\n\n... (diff truncated) ..."
+    if source_context and len(source_context) > max_context_chars:
+        source_context = source_context[:max_context_chars] + "\n\n... (source context truncated) ..."
 
-    return (
+    parts = [
         f"## Intent\n"
         f"**Title:** {intent.title}\n"
         f"**Summary:** {intent.summary}\n\n"
-        f"**Acceptance Criteria:**\n{ac_text}\n\n"
+        f"**Acceptance Criteria:**\n{ac_text}\n\n",
+    ]
+
+    if source_context:
+        parts.append(f"## Original Specification\n\n{source_context}\n\n")
+
+    parts.append(
         f"## Diff\n```diff\n{diff}\n```\n\n"
         f"Evaluate this implementation against the intent and acceptance criteria."
     )
+    return "".join(parts)
 
 
 def parse_evaluation_response(text: str) -> tuple[list[DimensionScore], list[CriterionAssessment]]:
@@ -120,14 +140,16 @@ async def evaluate(
     intent: IntentDocument,
     diff: str,
     model: str = "claude-sonnet-4-20250514",
+    source_context: str = "",
 ) -> EvaluationReport:
     """Run adversarial evaluation with a fresh model context.
 
-    The evaluator sees only intent + diff, never the implementation conversation.
+    The evaluator sees intent + diff + optional original specification,
+    never the implementation conversation.
     """
     from claude_code_sdk import query, ClaudeCodeOptions, Message
 
-    prompt = build_evaluation_prompt(intent, diff)
+    prompt = build_evaluation_prompt(intent, diff, source_context)
 
     messages: list[Message] = []
     async for msg in query(

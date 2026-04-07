@@ -105,6 +105,23 @@ def read_directory_specs(dir_path: str) -> str:
     return "\n\n".join(parts)
 
 
+def read_source_content(source: "SourceInfo") -> str:
+    """Read the full content for a source. Works for FILE, DIRECTORY, and INLINE.
+
+    Consolidates the content-reading logic that was previously duplicated across
+    intent.py, interview.py, and __main__.py.
+    """
+    if source.kind == SourceKind.FILE:
+        path = Path(source.raw)
+        if path.exists():
+            return path.read_text()
+        return source.raw
+    if source.kind == SourceKind.DIRECTORY:
+        return read_directory_specs(source.raw)
+    # INLINE: raw IS the content; JIRA: returns key as placeholder
+    return source.raw
+
+
 # ---------------------------------------------------------------------------
 # Intent
 # ---------------------------------------------------------------------------

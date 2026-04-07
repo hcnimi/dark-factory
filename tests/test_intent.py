@@ -5,8 +5,11 @@ import pytest
 
 from dark_factory.intent import (
     build_intent_prompt,
+    build_extraction_prompt,
+    is_structured_spec,
     parse_intent_response,
     INTENT_SYSTEM_PROMPT,
+    EXTRACT_INTENT_SYSTEM_PROMPT,
 )
 from dark_factory.types import SourceInfo, SourceKind
 
@@ -89,3 +92,61 @@ class TestParseIntentResponse:
         response = json.dumps({"title": "T", "summary": "S"})
         with pytest.raises(KeyError):
             parse_intent_response(response)
+
+
+class TestIsStructuredSpec:
+    def test_gherkin_markers(self):
+        content = "### Requirement: Foo\n#### Scenario: Bar\n- **GIVEN** something"
+        assert is_structured_spec(content) is True
+
+    def test_prose_returns_false(self):
+        content = "Please add a dark mode toggle to the settings page."
+        assert is_structured_spec(content) is False
+
+    def test_single_marker_returns_false(self):
+        content = "### Requirement: Only one marker here, nothing else structured."
+        assert is_structured_spec(content) is False
+
+    def test_real_spec_format(self):
+        content = (
+            "## ADDED Requirements\n\n"
+            "### Requirement: Foo\n"
+            "#### Scenario: Happy path\n"
+            "- **GIVEN** a valid input\n"
+            "- **WHEN** the user submits\n"
+            "- **THEN** the system responds 200\n"
+        )
+        assert is_structured_spec(content) is True
+
+    def test_changed_requirements_marker(self):
+        content = (
+            "## CHANGED Requirements\n\n"
+            "### Requirement: Updated auth flow\n"
+        )
+        assert is_structured_spec(content) is True
+
+
+class TestBuildExtractionPrompt:
+    def test_includes_content(self):
+        content = "### Requirement: Auth\n#### Scenario: Login"
+        prompt = build_extraction_prompt(content)
+        assert "Auth" in prompt
+        assert "Login" in prompt
+        assert "Extract" in prompt
+
+    def test_without_interview_context(self):
+        prompt = build_extraction_prompt("spec content")
+        assert "Amendments" not in prompt
+
+    def test_with_interview_context(self):
+        prompt = build_extraction_prompt(
+            "spec content",
+            interview_context="Q: Batch support?\nA: Yes, up to 1000"
+        )
+        assert "Amendments from Clarification" in prompt
+        assert "Batch support" in prompt
+        assert "take priority" in prompt
+
+    def test_extraction_system_prompt_preserves_detail(self):
+        assert "Do NOT summarize or condense" in EXTRACT_INTENT_SYSTEM_PROMPT
+        assert "50+" in EXTRACT_INTENT_SYSTEM_PROMPT

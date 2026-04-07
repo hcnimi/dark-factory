@@ -37,6 +37,36 @@ class TestBuildEvaluationPrompt:
         assert "truncated" in prompt
         assert len(prompt) < 55_000  # Truncated to ~50k + overhead
 
+    def test_includes_source_context(self):
+        intent = _make_intent()
+        prompt = build_evaluation_prompt(
+            intent, "diff", source_context="## Full Spec\nDetailed requirements here"
+        )
+        assert "Original Specification" in prompt
+        assert "Full Spec" in prompt
+        assert "Detailed requirements here" in prompt
+
+    def test_no_source_context_backward_compatible(self):
+        intent = _make_intent()
+        prompt = build_evaluation_prompt(intent, "diff")
+        assert "Original Specification" not in prompt
+
+    def test_source_context_truncation(self):
+        intent = _make_intent()
+        large_context = "y" * 40_000
+        prompt = build_evaluation_prompt(intent, "diff", source_context=large_context)
+        assert "source context truncated" in prompt
+
+    def test_source_context_between_intent_and_diff(self):
+        intent = _make_intent()
+        prompt = build_evaluation_prompt(
+            intent, "the diff", source_context="the spec"
+        )
+        intent_pos = prompt.index("Intent")
+        spec_pos = prompt.index("Original Specification")
+        diff_pos = prompt.index("## Diff")
+        assert intent_pos < spec_pos < diff_pos
+
 
 class TestParseEvaluationResponse:
     def test_valid_response(self):
