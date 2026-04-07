@@ -21,6 +21,7 @@ from .types import (
     RunStatus,
     SourceKind,
     classify_source,
+    read_source_content,
 )
 
 # Exit code for "paused at gate, resume to continue" (EX_TEMPFAIL)
@@ -212,26 +213,11 @@ def cmd_run(args: argparse.Namespace) -> None:
         sys.exit(130)
 
 
-def _read_source_content(source) -> str:
-    """Read the full source content for context preservation."""
-    if source.kind == SourceKind.FILE:
-        from pathlib import Path
-        path = Path(source.raw)
-        if path.exists():
-            return path.read_text()
-    if source.kind == SourceKind.DIRECTORY:
-        from .types import read_directory_specs
-        return read_directory_specs(source.raw)
-    # TODO: When JIRA support lands, fetch ticket summary + description
-    # from the JIRA API so the implementation agent receives full context.
-    return source.raw  # INLINE: raw IS the content; JIRA: returns key as placeholder
-
-
 async def _run_pipeline(state, repo_root, clarify_intent, run_implementation, evaluate, *, no_assess=False):
     from .state import log_event
 
     # --- Source Context Preservation ---
-    source_context = _read_source_content(state.source)
+    source_context = read_source_content(state.source)
     state.source_context_path(repo_root).write_text(source_context)
 
     # --- Input Assessment (default on, --no-assess skips) ---
@@ -328,7 +314,7 @@ async def _run_pipeline(state, repo_root, clarify_intent, run_implementation, ev
     state.status = RunStatus.EVALUATING
     state.save(repo_root)
 
-    report = await evaluate(intent, diff, state.config.evaluator_model)
+    report = await evaluate(intent, diff, state.config.evaluator_model, source_context=source_context)
     state.evaluation = report
     state.cost_usd += report.cost_usd
     state.save(repo_root)
@@ -369,6 +355,10 @@ async def _resume_pipeline(state, repo_root, run_implementation, evaluate):
     """Resume a pipeline that was paused at a gate."""
     from .state import log_event
 
+    # Load preserved source context for evaluation
+    ctx_path = state.source_context_path(repo_root)
+    source_context = ctx_path.read_text() if ctx_path.exists() else ""
+
     log_event(state, repo_root, "gate_approved", {"gate": state.status.value})
 
     if state.status == RunStatus.GATED_INTENT:
@@ -401,7 +391,7 @@ async def _resume_pipeline(state, repo_root, run_implementation, evaluate):
         state.status = RunStatus.EVALUATING
         state.save(repo_root)
 
-        report = await evaluate(state.intent, diff, state.config.evaluator_model)
+        report = await evaluate(state.intent, diff, state.config.evaluator_model, source_context=source_context)
         state.evaluation = report
         state.cost_usd += report.cost_usd
         state.save(repo_root)
@@ -595,10 +585,13 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
             sys.exit(1)
         diff = diff_file.read_text()
 
+        ctx_path = state.source_context_path(repo_root)
+        source_context = ctx_path.read_text() if ctx_path.exists() else ""
+
         state.status = RunStatus.EVALUATING
         state.save(repo_root)
 
-        report = asyncio.run(evaluate(state.intent, diff, state.config.evaluator_model))
+        report = asyncio.run(evaluate(state.intent, diff, state.config.evaluator_model, source_context=source_context))
         state.evaluation = report
         state.cost_usd += report.cost_usd
         state.save(repo_root)
