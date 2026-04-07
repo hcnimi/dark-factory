@@ -23,6 +23,7 @@ from dark_factory.types import (
     RunConfig,
     RunState,
     DarkFactoryError,
+    extract_json_from_response,
     extract_sdk_result,
 )
 
@@ -351,3 +352,50 @@ class TestExtractSdkResult:
         text, cost = extract_sdk_result(messages)
         assert text == "final result"
         assert cost == 0.5
+
+
+class TestExtractJsonFromResponse:
+    def test_clean_json(self):
+        result = extract_json_from_response('{"key": "value"}')
+        assert result == {"key": "value"}
+
+    def test_code_fenced_json(self):
+        text = '```json\n{"key": "value"}\n```'
+        result = extract_json_from_response(text)
+        assert result == {"key": "value"}
+
+    def test_code_fence_no_language(self):
+        text = '```\n{"key": "value"}\n```'
+        result = extract_json_from_response(text)
+        assert result == {"key": "value"}
+
+    def test_text_before_json(self):
+        text = 'Here is the evaluation:\n{"key": "value"}'
+        result = extract_json_from_response(text)
+        assert result == {"key": "value"}
+
+    def test_text_before_and_after(self):
+        text = 'Result:\n{"key": "value"}\nDone.'
+        result = extract_json_from_response(text)
+        assert result == {"key": "value"}
+
+    def test_prose_brace_before_real_json(self):
+        text = 'config {invalid} stuff\n{"real": true}'
+        result = extract_json_from_response(text)
+        assert result == {"real": True}
+
+    def test_empty_raises(self):
+        with pytest.raises(DarkFactoryError, match="Empty response"):
+            extract_json_from_response("")
+
+    def test_whitespace_raises(self):
+        with pytest.raises(DarkFactoryError, match="Empty response"):
+            extract_json_from_response("   \n  ")
+
+    def test_no_json_raises(self):
+        with pytest.raises(DarkFactoryError, match="Could not parse JSON"):
+            extract_json_from_response("no json here at all")
+
+    def test_malformed_json_raises(self):
+        with pytest.raises(DarkFactoryError, match="Could not parse JSON"):
+            extract_json_from_response('{"key": broken}')

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 from .types import (
     CriterionAssessment,
     CriterionStatus,
@@ -11,6 +9,7 @@ from .types import (
     DimensionScore,
     EvaluationReport,
     IntentDocument,
+    extract_json_from_response,
     extract_sdk_result,
 )
 
@@ -71,18 +70,27 @@ Be specific. Cite line numbers, function names, and code snippets from the diff.
 """
 
 
-def build_evaluation_prompt(intent: IntentDocument, diff: str, source_context: str = "") -> str:
+# Context budget scales with model capability
+_MODEL_LIMITS: dict[str, tuple[int, int]] = {
+    # (max_diff_chars, max_context_chars)
+    "claude-opus-4-6": (500_000, 200_000),  # 1M context window
+}
+_DEFAULT_LIMITS = (50_000, 30_000)  # Conservative for unknown models
+
+
+def build_evaluation_prompt(
+    intent: IntentDocument, diff: str, source_context: str = "", model: str = "",
+) -> str:
     """Build the prompt for evaluation.
 
     When source_context is provided, it is included as the original specification
     so the evaluator can assess against the full detail, not just the summarized
-    acceptance criteria.
+    acceptance criteria. Truncation limits scale with the model's context window.
     """
     ac_text = "\n".join(f"  {i}. {ac}" for i, ac in enumerate(intent.acceptance_criteria, 1))
 
     # Dynamic token budget: diff gets priority, source_context fills remainder
-    max_diff_chars = 50_000
-    max_context_chars = 30_000
+    max_diff_chars, max_context_chars = _MODEL_LIMITS.get(model, _DEFAULT_LIMITS)
     if len(diff) > max_diff_chars:
         diff = diff[:max_diff_chars] + "\n\n... (diff truncated) ..."
     if source_context and len(source_context) > max_context_chars:
@@ -107,13 +115,7 @@ def build_evaluation_prompt(intent: IntentDocument, diff: str, source_context: s
 
 def parse_evaluation_response(text: str) -> tuple[list[DimensionScore], list[CriterionAssessment]]:
     """Parse the evaluator's JSON response."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        cleaned = "\n".join(lines).strip()
-
-    data = json.loads(cleaned)
+    data = extract_json_from_response(text)
 
     scores = [
         DimensionScore(
@@ -139,7 +141,7 @@ def parse_evaluation_response(text: str) -> tuple[list[DimensionScore], list[Cri
 async def evaluate(
     intent: IntentDocument,
     diff: str,
-    model: str = "claude-sonnet-4-20250514",
+    model: str = "claude-opus-4-6",
     source_context: str = "",
 ) -> EvaluationReport:
     """Run adversarial evaluation with a fresh model context.
@@ -149,7 +151,7 @@ async def evaluate(
     """
     from claude_code_sdk import query, ClaudeCodeOptions, Message
 
-    prompt = build_evaluation_prompt(intent, diff, source_context)
+    prompt = build_evaluation_prompt(intent, diff, source_context, model=model)
 
     messages: list[Message] = []
     async for msg in query(

@@ -18,7 +18,7 @@ Delegates orchestration to the `dark_factory` Python package in phased steps. Ea
 | `--gate-eval` | Pause for human approval after evaluation |
 | `--in-place` | Work in repo directly instead of a git worktree |
 | `--max-cost N` | Cap total cost at N USD (default: 10) |
-| `--evaluator-model M` | Model for evaluation (default: claude-sonnet-4-20250514) |
+| `--evaluator-model M` | Model for evaluation (default: claude-opus-4-6) |
 | `--analyze-spec` | Quality-check the intent before implementation |
 | `--no-assess` | Skip automatic input assessment |
 

@@ -7,7 +7,7 @@ from dark_factory.spec_analyzer import (
     build_spec_analysis_prompt,
     parse_spec_analysis_response,
 )
-from dark_factory.types import IntentDocument, SpecAnalysisReport, DimensionScore
+from dark_factory.types import DarkFactoryError, IntentDocument, SpecAnalysisReport, DimensionScore
 
 
 class TestBuildSpecAnalysisPrompt:
@@ -49,6 +49,10 @@ class TestParseSpecAnalysisResponse:
         scores, suggestions = parse_spec_analysis_response(response)
         assert len(scores) == 1
         assert suggestions == []
+
+    def test_invalid_json_raises(self):
+        with pytest.raises(DarkFactoryError):
+            parse_spec_analysis_response("not json")
 
 
 class TestSpecAnalysisReport:

@@ -338,7 +338,7 @@ class SecurityPolicy:
 @dataclass
 class RunConfig:
     max_cost_usd: float = 10.0
-    evaluator_model: str = "claude-sonnet-4-20250514"
+    evaluator_model: str = "claude-opus-4-6"
     gates: list[Gate] = field(default_factory=list)
     in_place: bool = False
     dry_run: bool = False
@@ -358,7 +358,7 @@ class RunConfig:
     def from_dict(cls, d: dict[str, Any]) -> RunConfig:
         return cls(
             max_cost_usd=d.get("max_cost_usd", 10.0),
-            evaluator_model=d.get("evaluator_model", "claude-sonnet-4-20250514"),
+            evaluator_model=d.get("evaluator_model", "claude-opus-4-6"),
             gates=[Gate(g) for g in d.get("gates", [])],
             in_place=d.get("in_place", False),
             dry_run=d.get("dry_run", False),
@@ -512,3 +512,44 @@ def extract_sdk_result(messages: list) -> tuple[str, float]:
         text = "\n".join(parts)
 
     return text, cost
+
+
+def extract_json_from_response(text: str) -> Any:
+    """Extract and parse a JSON object from an LLM response.
+
+    Handles common quirks: bare JSON, code-fenced JSON, prose before/after
+    the JSON object. Raises DarkFactoryError on parse failure.
+    """
+    cleaned = text.strip()
+    if not cleaned:
+        raise DarkFactoryError("Empty response from model (expected JSON)")
+
+    # Fast path: response is already clean JSON
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Code fence path: extract content from ```json ... ``` blocks
+    fence_match = re.search(r"```(?:json)?\s*\n(.*?)\n\s*```", cleaned, re.DOTALL)
+    if fence_match:
+        try:
+            return json.loads(fence_match.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+
+    # Scan path: find each '{' and try to parse from there.
+    # Use raw_decode to handle trailing text after the JSON object.
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(cleaned):
+        if ch == "{":
+            try:
+                obj, _ = decoder.raw_decode(cleaned, i)
+                return obj
+            except json.JSONDecodeError:
+                continue
+
+    raise DarkFactoryError(
+        f"Could not parse JSON from model response. "
+        f"First 200 chars: {cleaned[:200]}"
+    )

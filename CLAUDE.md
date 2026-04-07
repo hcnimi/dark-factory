@@ -63,7 +63,7 @@ The pipeline has three core components that run sequentially:
 
 2. **Implementation** (`infra.py`) — Creates a git worktree, launches an Opus SDK agent with a security-gated `can_use_tool` callback, runs tests, and captures the diff. One fix retry on test failure (budget permitting).
 
-3. **Evaluation** (`evaluator.py`) — Adversarial scoring by a fresh Sonnet agent that never sees the implementation conversation. Scores on Intent Fidelity, Correctness, and Integration (0-10 each) plus per-criterion met/partial/not_met.
+3. **Evaluation** (`evaluator.py`) — Adversarial scoring by a fresh Opus agent that never sees the implementation conversation. Scores on Intent Fidelity, Correctness, and Integration (0-10 each) plus per-criterion met/partial/not_met.
 
 ### Key modules
 

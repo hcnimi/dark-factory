@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
-
 from .types import (
     DarkFactoryError,
     DimensionScore,
     IntentDocument,
     SpecAnalysisReport,
+    extract_json_from_response,
     extract_sdk_result,
 )
 
@@ -65,13 +64,7 @@ def build_spec_analysis_prompt(intent: IntentDocument) -> str:
 
 def parse_spec_analysis_response(text: str) -> tuple[list[DimensionScore], list[str]]:
     """Parse the analyzer's JSON response."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        lines = [line for line in lines if not line.strip().startswith("```")]
-        cleaned = "\n".join(lines).strip()
-
-    data = json.loads(cleaned)
+    data = extract_json_from_response(text)
 
     scores = [
         DimensionScore(

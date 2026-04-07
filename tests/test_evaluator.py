@@ -10,6 +10,7 @@ from dark_factory.evaluator import (
 )
 from dark_factory.types import (
     CriterionStatus,
+    DarkFactoryError,
     IntentDocument,
 )
 
@@ -30,12 +31,24 @@ class TestBuildEvaluationPrompt:
         assert "Returns 200" in prompt
         assert "diff content" in prompt
 
-    def test_truncates_large_diff(self):
+    def test_does_not_truncate_moderate_diff_with_opus(self):
+        intent = _make_intent()
+        large_diff = "x" * 200_000
+        prompt = build_evaluation_prompt(intent, large_diff, model="claude-opus-4-6")
+        assert "truncated" not in prompt
+
+    def test_truncates_very_large_diff_with_opus(self):
+        intent = _make_intent()
+        huge_diff = "x" * 600_000
+        prompt = build_evaluation_prompt(intent, huge_diff, model="claude-opus-4-6")
+        assert "truncated" in prompt
+
+    def test_truncation_with_default_limits(self):
         intent = _make_intent()
         large_diff = "x" * 60_000
-        prompt = build_evaluation_prompt(intent, large_diff)
+        prompt = build_evaluation_prompt(intent, large_diff, model="unknown-model")
         assert "truncated" in prompt
-        assert len(prompt) < 55_000  # Truncated to ~50k + overhead
+        assert len(prompt) < 55_000
 
     def test_includes_source_context(self):
         intent = _make_intent()
@@ -51,10 +64,16 @@ class TestBuildEvaluationPrompt:
         prompt = build_evaluation_prompt(intent, "diff")
         assert "Original Specification" not in prompt
 
-    def test_source_context_truncation(self):
+    def test_source_context_no_truncation_with_opus(self):
+        intent = _make_intent()
+        large_context = "y" * 100_000
+        prompt = build_evaluation_prompt(intent, "diff", source_context=large_context, model="claude-opus-4-6")
+        assert "source context truncated" not in prompt
+
+    def test_source_context_truncation_with_default_limits(self):
         intent = _make_intent()
         large_context = "y" * 40_000
-        prompt = build_evaluation_prompt(intent, "diff", source_context=large_context)
+        prompt = build_evaluation_prompt(intent, "diff", source_context=large_context, model="unknown-model")
         assert "source context truncated" in prompt
 
     def test_source_context_between_intent_and_diff(self):
@@ -99,7 +118,7 @@ class TestParseEvaluationResponse:
         assert scores[0].score == 10
 
     def test_invalid_json_raises(self):
-        with pytest.raises(json.JSONDecodeError):
+        with pytest.raises(DarkFactoryError):
             parse_evaluation_response("not json")
 
     def test_missing_scores_raises(self):

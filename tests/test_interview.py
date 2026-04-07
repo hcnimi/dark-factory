@@ -8,7 +8,7 @@ from dark_factory.interview import (
     parse_interview_response,
     format_amplification_context,
 )
-from dark_factory.types import InterviewQA, SourceInfo, SourceKind
+from dark_factory.types import DarkFactoryError, InterviewQA, SourceInfo, SourceKind
 
 
 class TestBuildInterviewPrompt:
@@ -60,7 +60,7 @@ class TestParseInterviewResponse:
         assert questions == ["Q1"]
 
     def test_invalid_json_raises(self):
-        with pytest.raises(json.JSONDecodeError):
+        with pytest.raises(DarkFactoryError):
             parse_interview_response("not json at all")
 
     def test_missing_questions_key(self):

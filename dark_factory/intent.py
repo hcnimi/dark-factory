@@ -7,10 +7,9 @@ uses condensation mode that synthesizes structure from scratch.
 
 from __future__ import annotations
 
-import json
 import sys
 
-from .types import DarkFactoryError, IntentDocument, SourceInfo, SourceKind, extract_sdk_result, read_source_content
+from .types import DarkFactoryError, IntentDocument, SourceInfo, SourceKind, extract_json_from_response, extract_sdk_result, read_source_content
 
 # Markers that indicate a structured spec (vs. prose or vague description)
 _STRUCTURED_MARKERS = [
@@ -179,15 +178,7 @@ def build_intent_prompt(source: SourceInfo, interview_context: str | None = None
 
 def parse_intent_response(text: str) -> IntentDocument:
     """Parse the model's JSON response into an IntentDocument."""
-    # Strip markdown code fences if present
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        # Remove first and last fence lines
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        cleaned = "\n".join(lines).strip()
-
-    data = json.loads(cleaned)
+    data = extract_json_from_response(text)
     return IntentDocument(
         title=data["title"],
         summary=data["summary"],

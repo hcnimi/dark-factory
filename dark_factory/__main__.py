@@ -579,45 +579,65 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
         from .evaluator import evaluate
         from .state import log_event
 
-        diff_file = state.diff_path(repo_root)
-        if not diff_file.exists():
-            print(f"error: no diff file for run {args.run}", file=sys.stderr)
-            sys.exit(1)
-        diff = diff_file.read_text()
+        try:
+            diff_file = state.diff_path(repo_root)
+            if not diff_file.exists():
+                raise DarkFactoryError(f"No diff file for run {args.run}")
+            diff = diff_file.read_text()
 
-        ctx_path = state.source_context_path(repo_root)
-        source_context = ctx_path.read_text() if ctx_path.exists() else ""
+            ctx_path = state.source_context_path(repo_root)
+            source_context = ctx_path.read_text() if ctx_path.exists() else ""
 
-        state.status = RunStatus.EVALUATING
-        state.save(repo_root)
-
-        report = asyncio.run(evaluate(state.intent, diff, state.config.evaluator_model, source_context=source_context))
-        state.evaluation = report
-        state.cost_usd += report.cost_usd
-        state.save(repo_root)
-        log_event(state, repo_root, "evaluation_complete", {"report": report.to_dict()})
-
-        eval_path = state.evaluation_path(repo_root)
-        eval_path.write_text(json.dumps(report.to_dict(), indent=2) + "\n")
-
-        print(report.format_for_display())
-
-        if Gate.EVAL in state.config.gates:
-            state.diff_path(repo_root).write_text(diff)
-            state.status = RunStatus.GATED_EVAL
+            state.status = RunStatus.EVALUATING
             state.save(repo_root)
-            log_event(state, repo_root, "gated_eval", {})
-            _handle_gate(state, repo_root, "eval",
-                         "\nAccept evaluation? [Y/n/abort] ",
-                         "aborted by user after evaluation")
 
-        state.status = RunStatus.COMPLETE
-        state.save(repo_root)
-        log_event(state, repo_root, "run_complete", {
-            "cost_usd": state.cost_usd,
-            "status": state.status.value,
-        })
-        print(json.dumps(state.to_dict(), indent=2))
+            report = asyncio.run(evaluate(state.intent, diff, state.config.evaluator_model, source_context=source_context))
+            state.evaluation = report
+            state.cost_usd += report.cost_usd
+            state.save(repo_root)
+            log_event(state, repo_root, "evaluation_complete", {"report": report.to_dict()})
+
+            eval_path = state.evaluation_path(repo_root)
+            eval_path.write_text(json.dumps(report.to_dict(), indent=2) + "\n")
+
+            print(report.format_for_display())
+
+            if Gate.EVAL in state.config.gates:
+                state.diff_path(repo_root).write_text(diff)
+                state.status = RunStatus.GATED_EVAL
+                state.save(repo_root)
+                log_event(state, repo_root, "gated_eval", {})
+                _handle_gate(state, repo_root, "eval",
+                             "\nAccept evaluation? [Y/n/abort] ",
+                             "aborted by user after evaluation")
+
+            state.status = RunStatus.COMPLETE
+            state.save(repo_root)
+            log_event(state, repo_root, "run_complete", {
+                "cost_usd": state.cost_usd,
+                "status": state.status.value,
+            })
+            print(json.dumps(state.to_dict(), indent=2))
+        except DarkFactoryError as e:
+            state.status = RunStatus.FAILED
+            state.error = str(e)
+            state.save(repo_root)
+            log_event(state, repo_root, "evaluation_failed", {"error": str(e)})
+            print(f"\nerror: {e}", file=sys.stderr)
+            sys.exit(1)
+        except KeyboardInterrupt:
+            state.status = RunStatus.FAILED
+            state.error = "interrupted by user"
+            state.save(repo_root)
+            print("\ninterrupted", file=sys.stderr)
+            sys.exit(130)
+        except Exception as e:
+            state.status = RunStatus.FAILED
+            state.error = str(e)
+            state.save(repo_root)
+            log_event(state, repo_root, "evaluation_failed", {"error": str(e)})
+            print(f"\nerror (unexpected): {e}", file=sys.stderr)
+            sys.exit(1)
         return
 
     # Standalone branch evaluation
@@ -659,10 +679,16 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
         )
 
     from .evaluator import evaluate
-    report = asyncio.run(evaluate(intent, diff, args.evaluator_model))
-
-    print(report.format_for_display())
-    print(json.dumps(report.to_dict(), indent=2))
+    try:
+        report = asyncio.run(evaluate(intent, diff, args.evaluator_model))
+        print(report.format_for_display())
+        print(json.dumps(report.to_dict(), indent=2))
+    except DarkFactoryError as e:
+        print(f"\nerror: {e}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+        sys.exit(130)
 
 
 # ---------------------------------------------------------------------------
@@ -685,7 +711,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("input", nargs="?", help="Jira key, file path, or inline description")
     run_p.add_argument("--resume", metavar="RUN_ID", help="Resume a gated run by its run ID")
     run_p.add_argument("--max-cost", type=float, default=10.0, help="Max cost in USD (default: 10)")
-    run_p.add_argument("--evaluator-model", default="claude-sonnet-4-20250514", help="Model for evaluation")
+    run_p.add_argument("--evaluator-model", default="claude-opus-4-6", help="Model for evaluation")
     run_p.add_argument("--gate-intent", action="store_true", help="Pause for approval after intent")
     run_p.add_argument("--gate-eval", action="store_true", help="Pause for approval after evaluation")
     run_p.add_argument("--in-place", action="store_true", help="Work in repo directly (no worktree)")
@@ -710,7 +736,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_p.add_argument("branch", nargs="?", help="Branch to evaluate")
     eval_p.add_argument("--run", metavar="RUN_ID", help="Evaluate a phased run by its run ID")
     eval_p.add_argument("--intent", help="Path to intent document")
-    eval_p.add_argument("--evaluator-model", default="claude-sonnet-4-20250514", help="Model for evaluation")
+    eval_p.add_argument("--evaluator-model", default="claude-opus-4-6", help="Model for evaluation")
 
     return parser
 

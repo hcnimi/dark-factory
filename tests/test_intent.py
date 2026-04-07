@@ -14,7 +14,7 @@ from dark_factory.intent import (
     INTENT_SYSTEM_PROMPT,
     EXTRACT_INTENT_SYSTEM_PROMPT,
 )
-from dark_factory.types import IntentDocument, SourceInfo, SourceKind
+from dark_factory.types import DarkFactoryError, IntentDocument, SourceInfo, SourceKind
 
 
 class TestBuildIntentPrompt:
@@ -88,7 +88,7 @@ class TestParseIntentResponse:
         assert doc.title == "T"
 
     def test_invalid_json_raises(self):
-        with pytest.raises(json.JSONDecodeError):
+        with pytest.raises(DarkFactoryError):
             parse_intent_response("not json at all")
 
     def test_missing_field_raises(self):
