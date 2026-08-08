@@ -7,6 +7,10 @@ build/
 .claude/
 .dark-factory/
 
+# Editor / OS cruft
+.DS_Store
+.idea/
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
